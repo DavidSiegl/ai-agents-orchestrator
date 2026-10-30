@@ -742,11 +742,13 @@ _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<deta
 # scripts actionlint has shellcheck read, a comment for shellcheck; in Markdown, a line that is pymarkdown's pragma,
 # an HTML comment from the line's first column to its end (pymarkdownlnt 0.9.41's PragmaToken.look_for_pragmas);
 # and in Rust, an attribute: an allow or expect inside one attribute's brackets, also inside a cfg_attr, as in
-# `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
+# `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's; and cargo-mutants' own
+# `#[mutants::skip]`, also inside a cfg_attr, wrapped or not, which keeps a function from being mutated.
 _PYTHON_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|pragma:\s*no\s*(?:cover|branch|mutate))\b")
 _SHELL_SUPPRESSION = re.compile(r"#.*\bshellcheck\s+disable\b")
 _MARKDOWN_SUPPRESSION = re.compile(r"^<!---?\s*pyml\s+disable.*-->\s*$", re.IGNORECASE)
-_RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\(")
+_RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\("
+                               r"|#!?\[[^\]]*\bmutants::skip\b|^\s*mutants::skip\b")
 
 
 @dataclass(frozen=True)
@@ -1001,18 +1003,18 @@ def _rust_not_run(why: str) -> dict:
     return _finding(None, None, "not-run", f"{why}, so the check judged none of the change's Rust.")
 
 
-def _cargo_workspaces(root: str, files: Iterable[str]) -> tuple[list[str], list[str]]:
+def _cargo_workspaces(root: str, files: Iterable[str], tool: str = "clippy") -> tuple[list[str], list[str]]:
     """The root manifest of each Cargo workspace that a Cargo.toml among files, paths relative to root, the
-    repository's top level, belongs to, relative to root, in path order; and a failed condition, naming clippy, for
-    each manifest whose workspace cargo cannot tell."""
+    repository's top level, belongs to, relative to root, in path order; and a failed condition, naming tool, the
+    tool that needs to know, for each manifest whose workspace cargo cannot tell."""
     roots, problems = set(), []
     for manifest in sorted(f for f in files if os.path.basename(f) == "Cargo.toml"):
-        proc = _tool_process("clippy", ["cargo", "locate-project", "--workspace", "--message-format", "plain",
-                                        "--manifest-path", manifest], root)
+        proc = _tool_process(tool, ["cargo", "locate-project", "--workspace", "--message-format", "plain",
+                                    "--manifest-path", manifest], root)
         if isinstance(proc, str):
             problems.append(proc)
         elif proc.returncode != 0:
-            problems.append(f"`clippy` could not find the workspace of `{manifest}`: {_said(proc)}")
+            problems.append(f"`{tool}` could not find the workspace of `{manifest}`: {_said(proc)}")
         else:
             roots.add(os.path.relpath(proc.stdout.strip(), root))
     return sorted(roots), problems
@@ -3453,9 +3455,11 @@ _SURVIVOR_EXAMPLES = 3
 
 def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str | None = None) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
-    a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
-    not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
-    and after; and each such function that no test calls. The change leaves out mutmut's state, as
+    a line to in a Python file outside the tests, then, with what is left of budget, the Rust the change adds lines to,
+    with cargo-mutants, as _cargo_mutants_on_copy says; mutmut has half the budget when there is Rust to mutate
+    too. Reports at its def each such function that has mutants the
+    tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
+    line before and after; and each such function that no test calls. The change leaves out mutmut's state, as
     GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
     special file is not read to choose the functions (_is_link_or_special), so none of its functions is a changed
     one; a symlink's target has its functions chosen only as a file the change edits. mutmut's own walk of the copy
@@ -3479,9 +3483,15 @@ def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str |
     mutmut starts, and each mutated function is an untested finding. A file unfit to tell them, or a collection that
     fails, is a not-narrowed finding saying why, and mutmut runs the whole selection.
     """
+    deadline = time.monotonic() + budget
+    rust = _changed_rust_code(change)
     functions, out = _changed_python_functions(change)
     if functions:
-        out += _mutation_test(change, functions, budget, test_contexts)
+        # Half the budget for mutmut when there is Rust to mutate too; cargo-mutants has the rest, by deadline.
+        out += _mutation_test(change, functions, budget / 2 if rust else budget, test_contexts)
+    if rust:
+        out += _in_scratch_directory("not-run", "to run cargo-mutants on a copy of the tree in",
+                                     lambda tmp: _cargo_mutants_on_copy(change, tmp, rust, budget, deadline))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4131,6 +4141,205 @@ def _said_by_mutmut(proc: subprocess.CompletedProcess) -> str:
 
 def _mutation_not_run(problem: str) -> dict:
     return _finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
+
+
+# Surviving mutants in Rust: surviving_mutants's second half, which runs cargo-mutants.
+
+# How each outcome cargo-mutants 27 writes in mutants.out/outcomes.json (a scenario's "summary") counts, as mutmut's
+# statuses do: a missed mutant survived; a caught one, and one whose tests outlived cargo-mutants' --timeout, as mutmut
+# counts a timeout, did not; an unviable one, which does not build, was not tried. "Success" and "Failure" are the
+# unmutated baseline's.
+_CARGO_MUTANTS_SURVIVED = "MissedMutant"
+_CARGO_MUTANTS_TRIED = frozenset({"MissedMutant", "CaughtMutant", "Timeout"})
+
+# The seconds cargo-mutants gives one mutant's tests before it counts them a timeout (its --timeout).
+CARGO_MUTANTS_TEST_TIMEOUT = 60
+
+
+def _changed_rust_code(change: GateChange) -> list[str]:
+    """The Rust files, sorted, that the change adds lines to outside the tests, as _rust_code says, which
+    surviving_mutants gives cargo-mutants."""
+    return sorted(p for p, added in change.changed.items() if added and _is_rust_source(change, p)
+                  and _rust_code(change, p))
+
+
+def _cargo_mutants_on_copy(change: GateChange, tmp: str, paths: list[str], budget: float,
+                           deadline: float) -> list[dict]:
+    """surviving_mutants's findings for Rust, on paths, _changed_rust_code's: runs cargo-mutants on each Cargo workspace
+    that holds one of them (_cargo_root), in a copy of the files git tracks that it makes in tmp, an empty directory,
+    as mutmut's, beside each run's diff and output, by deadline, a time.monotonic() time; budget is the check's, as
+    findings name it. cargo-mutants picks what to mutate itself: `--in-diff` with the change's diff of that workspace's
+    .rs files mutates only what the added lines hold, and its tests run with `--test-tool nextest`, each mutant's
+    within CARGO_MUTANTS_TEST_TIMEOUT. A change whose added lines hold nothing to mutate, such as a use or a const,
+    gives nothing.
+
+    Each function with mutants that survived is a survived finding at the line its fn starts, with how many of the
+    mutants tried of it they were and the first _SURVIVOR_EXAMPLES of them, as mutmut's (_CARGO_MUTANTS_SURVIVED,
+    _CARGO_MUTANTS_TRIED). A run the deadline stops is a budget-reached finding, beside what the mutants it had tried
+    showed, and the workspaces after it are not-run findings. A workspace whose unmutated baseline fails, and a
+    cargo-mutants that cannot start, fails otherwise or writes outcomes the gate cannot read, are not-run findings, and
+    so are a copy that cannot be made and a workspace cargo cannot tell; a copy that cannot be removed afterwards is a
+    not-removed finding, which the caller's _in_scratch_directory gives."""
+    tree_copy = os.path.join(tmp, "tree")
+    try:
+        _copy_tracked(change.root, tree_copy)
+    except (OSError, GateError) as e:
+        return [_cargo_mutants_not_run(f"could not copy the tree for cargo-mutants: {e}")]
+    roots: dict[str, list[str]] = {}
+    out = []
+    for path in paths:
+        root, why = _cargo_root(tree_copy, path)
+        if root is None:
+            out.append(_finding(path, None, "not-mutated", f"was not mutation-tested: {why}."))
+        else:
+            roots.setdefault(root, []).append(path)
+    ordered = sorted(roots.items())
+    for n, (root, mine) in enumerate(ordered):
+        found, stopped = _cargo_mutants_run(change, tree_copy, os.path.join(tmp, f"run-{n}"), root, mine, budget,
+                                            deadline)
+        out += found
+        if stopped:
+            out += [_cargo_mutants_not_run(f"the budget ran out before cargo-mutants reached the workspace at "
+                                           f"`{later or '.'}`") for later, _ in ordered[n + 1:]]
+            break
+    return out
+
+
+def _cargo_root(tree: str, path: str) -> tuple[str | None, str]:
+    """The directory, from tree's top, "" for the top itself, that cargo-mutants runs in to mutate the Rust file at
+    path, a repository path: that of the root manifest of the workspace, as cargo tells it (_cargo_workspaces), of the
+    package whose Cargo.toml is nearest above it. Or None and why, a clause: no Cargo.toml lies above it, or cargo
+    cannot tell its workspace."""
+    *dirs, _ = path.split("/")
+    nearest = next((m for m in ("/".join([*dirs[:k], "Cargo.toml"]) for k in range(len(dirs), -1, -1))
+                    if os.path.isfile(os.path.join(tree, m))), None)
+    if nearest is None:
+        return None, "no Cargo.toml lies above it"
+    [*manifests], problems = _cargo_workspaces(tree, [nearest], "cargo-mutants")
+    if not manifests:
+        return None, problems[0].rstrip(".") if problems else f"cargo cannot tell the workspace of `{nearest}`"
+    return os.path.dirname(manifests[0]).replace(os.sep, "/"), ""
+
+
+def _diff_under(diff: str, root: str, paths: list[str]) -> str:
+    """The sections of diff, a `git diff` of the change, of the files at paths, each under root, a directory from the
+    repository's top, "" for the top, with their paths made relative to root, as cargo-mutants' --in-diff reads them
+    from the directory it runs in."""
+    prefix = f"{root}/" if root else ""
+    wanted = {f"b/{p}" for p in paths}
+    out = []
+    for section in re.split(r"(?m)^(?=diff --git )", diff):
+        lines = section.split("\n")
+        if not (section.startswith("diff --git ") and any(lines[0].endswith(f" {w}") for w in wanted)):
+            continue
+        # Only the header, before the first hunk, names the paths; a hunk's lines are the file's, kept as they are.
+        body = next((i for i, line in enumerate(lines) if line.startswith("@@")), len(lines))
+        head = [line.replace(f"a/{prefix}", "a/").replace(f"b/{prefix}", "b/") for line in lines[:body]]
+        out.append("\n".join(head + lines[body:]))
+    return "".join(out)
+
+
+def _cargo_mutants_run(change: GateChange, tree_copy: str, scratch: str, root: str, paths: list[str], budget: float,
+                       deadline: float) -> tuple[list[dict], bool]:
+    """The findings of one run of cargo-mutants in the workspace at root in tree_copy on what the change adds to paths,
+    writing its diff and output under scratch, a directory it makes; and whether the deadline stopped it."""
+    left = deadline - time.monotonic() - MUTMUT_STOP_GRACE - TOOL_KILL_WAIT
+    diff_text = _diff_under(change.diff, root, paths)
+    if not diff_text:
+        return [], False
+    if left <= 0:
+        return [_finding(None, None, "budget-reached",
+                         f"budget reached before cargo-mutants started on the workspace at `{root or '.'}`: the "
+                         f"{budget:g} seconds of `--mutation-budget` left too little to run and stop it, so its "
+                         f"mutants were not tried.")], True
+    diff = os.path.join(scratch, "change.diff")
+    try:
+        os.makedirs(scratch)
+        with open(diff, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(diff_text)
+    except OSError as e:
+        return [_cargo_mutants_not_run(f"could not write the change's diff for cargo-mutants: {e}")], False
+    # --in-place mutates the copy itself, which cargo-mutants would otherwise copy once more; mutants.out goes to
+    # scratch, outside it.
+    argv = ["cargo", "mutants", "--in-place", "--no-shuffle", "--dir", os.path.join(tree_copy, root),
+            "--in-diff", diff, "--test-tool", "nextest", "--timeout", str(CARGO_MUTANTS_TEST_TIMEOUT),
+            "--output", scratch, "--colors", "never"]
+    try:
+        proc, stopped = _run_in_session(argv, tree_copy, {**tool_env(), "CARGO_TERM_COLOR": "never"}, timeout=left,
+                                        soft_stop=(signal.SIGINT, MUTMUT_STOP_GRACE))
+    except OSError as e:
+        return [_cargo_mutants_not_run(f"could not start cargo-mutants: {e}")], False
+    output = os.path.join(scratch, "mutants.out")
+    # cargo-mutants writes no outcomes when it finds nothing to mutate in the diff, and exits 0.
+    if proc.returncode == 0 and not stopped and not os.path.lexists(os.path.join(output, "outcomes.json")):
+        return [], False
+    outcomes, problem = _cargo_mutants_outcomes(output)
+    if problem and stopped:
+        outcomes = []
+    elif problem:
+        return [_cargo_mutants_not_run(f"cargo-mutants, exiting with status {proc.returncode}, wrote no outcomes the "
+                                       f"gate can read ({problem}): {_said(proc)}")], False
+    where = f"the workspace at `{root or '.'}`"
+    baseline = next((o["summary"] for o in outcomes if o["scenario"] == "Baseline"), None)
+    if baseline not in (None, "Success"):
+        return [_cargo_mutants_not_run(f"the unmutated baseline of {where} did not pass ({baseline}, as cargo-mutants "
+                                       f"words it; its log is mutants.out/log/baseline.log), so it tried no "
+                                       f"mutant")], stopped
+    try:
+        out = _cargo_mutants_survivors(f"{root}/" if root else "", outcomes)
+    except (KeyError, TypeError, AttributeError) as e:
+        return [_cargo_mutants_not_run(f"cargo-mutants wrote a mutant's outcome the gate cannot read ({e!r})")], stopped
+    if stopped:
+        tried = sum(1 for o in outcomes if o["summary"] in _CARGO_MUTANTS_TRIED)
+        when = (f"after {tried} of the mutants cargo-mutants made of {where}" if outcomes
+                else f"before cargo-mutants had tested the unmutated baseline of {where}")
+        out.append(_finding(None, None, "budget-reached",
+                            f"budget reached {when}: it was stopped at {budget:g} seconds (`--mutation-budget`), so "
+                            f"the mutants it did not try may survive too."))
+    return out, stopped
+
+
+def _cargo_mutants_outcomes(output: str) -> tuple[list[dict], str | None]:
+    """The outcomes cargo-mutants wrote to outcomes.json in output, its mutants.out, each {"scenario", "summary"} as it
+    writes them, the scenario "Baseline" or {"Mutant": {...}}; cargo-mutants rewrites the file after each mutant, so a
+    run it was stopped in leaves those it finished. Or [] and the problem, a clause, when it cannot be read."""
+    path = os.path.join(output, "outcomes.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            outcomes = json.load(f)["outcomes"]
+        if not all(isinstance(o, dict) and "scenario" in o and isinstance(o.get("summary"), str) for o in outcomes):
+            return [], f"{path} holds an outcome without a scenario or a summary"
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+        return [], f"{path}: {e}"
+    return outcomes, None
+
+
+def _cargo_mutants_survivors(prefix: str, outcomes: list[dict]) -> list[dict]:
+    """A survived finding for each function of which outcomes, cargo-mutants', hold a missed mutant, at the line its
+    fn's span starts, in the file cargo-mutants names with prefix, its workspace's directory and a slash, before it:
+    how many of its tried mutants survived, and what the first _SURVIVOR_EXAMPLES of them change, in the order
+    cargo-mutants tried them, by the description in its name, as `line 10: replace > with == in unchecked`."""
+    by_function: dict[tuple[str, str, int], list[tuple[str, dict]]] = {}
+    for o in outcomes:
+        mutant = o["scenario"].get("Mutant") if isinstance(o["scenario"], dict) else None
+        if mutant and o["summary"] in _CARGO_MUTANTS_TRIED:
+            function = mutant.get("function") or {}
+            key = (prefix + mutant["file"], function.get("function_name", "?"),
+                   function.get("span", mutant["span"])["start"]["line"])
+            by_function.setdefault(key, []).append((o["summary"], mutant))
+    out = []
+    for (path, name, line), tried in by_function.items():
+        survived = [m for summary, m in tried if summary == _CARGO_MUTANTS_SURVIVED]
+        if survived:
+            examples = [f"line {m['span']['start']['line']}: {m['name'].split(': ', 1)[-1]}"
+                        for m in survived[:_SURVIVOR_EXAMPLES]]
+            out.append(_finding(path, line, "survived", f"{len(survived)} of {len(tried)} mutants of `{name}` survived "
+                                                        f"its tests: {'; '.join(examples)}."))
+    return out
+
+
+def _cargo_mutants_not_run(problem: str) -> dict:
+    return _finding(None, None, "not-run", f"{problem}; the change's Rust was not mutation-tested.")
 
 
 # Cognitive complexity: how hard a function is to follow, which a change raises when it piles branches into the

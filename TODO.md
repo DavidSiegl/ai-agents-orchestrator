@@ -79,9 +79,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
   `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30), and `vague-names` reads its
   `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`), and `passes-at-base` runs the changed Rust tests at the
-  base with cargo-nextest (ticket 05, 2026-10-30: `_rust_passes_at_base`); their blind spots are under Open issues.
-  Left: `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the switch (06 and
-  07). Decided against (2026-10-29, the user's): a Rust counterpart of
+  base with cargo-nextest (ticket 05, 2026-10-30: `_rust_passes_at_base`), and `surviving-mutants` mutation-tests
+  the Rust a change adds with cargo-mutants (ticket 06, 2026-10-30: `_cargo_mutants_on_copy`); their blind spots are
+  under Open issues. Left: a Cargo ecosystem for `new-dependencies` after the switch (07). Decided against (2026-10-29, the user's): a Rust counterpart of
   `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
   `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 
@@ -472,6 +472,18 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `target/`, where the base's build would overwrite the binaries Cargo copies up to `target/debug`. Closes, if the
   budget runs out on real changes, with a target directory that lasts between gate runs outside every workspace, as
   `ci/cargo-lock.sh`'s lock file does.
+- **`surviving-mutants` splits its budget by language, not by work, and builds Rust anew.** `surviving_mutants` gives
+  mutmut half the `--mutation-budget` when the change has Rust to mutate too, and cargo-mutants
+  (`_cargo_mutants_on_copy`) what is left by the check's deadline, however many functions each language has; and
+  cargo-mutants runs `--in-place` in a copy of its own without `target/`, beside mutmut's, so each run copies the
+  tree again and compiles the workspace and its dependencies before its baseline. Not measured on Jenkins: gate-rust-checks ticket 06 asked for the Gate stage's added time on a
+  Rust change, which needs a Jenkins build on the branch. Found by ticket 06 (2026-10-30). Closes, if the run metrics
+  show either language starved, with the budget split by each language's changed functions, one copy for both tools,
+  and a target directory that lasts between gate runs (the same as passes-at-base's below).
+- **cargo-mutants is pinned by the sha256 of its archive as downloaded, not as published.** Its releases publish no
+  checksums file (`ci/install-tools.sh`), so the pin of v27.1.0 holds the archive the gate's author downloaded on
+  2026-10-30, trusted on first use. Closes with a release that publishes checksums, or the asset digest GitHub shows on
+  the release page, checked by hand as cargo-llvm-cov's was.
 - **`passes-at-base` places a Rust test's target by Cargo's default layout only.** `_rust_target` reads the file's
   place: a target a manifest puts elsewhere (`[[test]] path = ...`, `autotests = false`), a module a `#[path]`
   attribute names, a module of `src/main.rs` in a package that also has `src/lib.rs` (taken for the library's), and a

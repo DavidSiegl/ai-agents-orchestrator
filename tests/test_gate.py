@@ -3504,6 +3504,139 @@ class TestRustVagueNames(RepositoryTest):
         self.assertEqual(self.found(rust_syntax=missing), [])
 
 
+def cargo_mutant(name, summary, function="unchecked", fn_line=9, file="src/lib.rs", line=10):
+    """One outcome as cargo-mutants 27 writes it to outcomes.json, of a mutant of function, whose fn starts at
+    fn_line, named name after its place."""
+    return {"scenario": {"Mutant": {"name": f"{file}:{line}:7: {name}", "file": file, "span": {"start": {"line": line}},
+                                    "function": {"function_name": function, "span": {"start": {"line": fn_line}}}}},
+            "summary": summary}
+
+
+class TestCargoMutantsOutcomes(unittest.TestCase):
+    """How the surviving-mutants check reads cargo-mutants' outcomes, on fakes of them."""
+
+    def test_missed_survives_caught_and_timeout_are_tried_and_unviable_is_not(self):
+        outcomes = [{"scenario": "Baseline", "summary": "Success"},
+                    cargo_mutant("replace > with == in unchecked", "MissedMutant"),
+                    cargo_mutant("replace > with < in unchecked", "CaughtMutant"),
+                    cargo_mutant("replace unchecked -> bool with true", "Timeout"),
+                    cargo_mutant("replace unchecked -> bool with false", "Unviable"),
+                    cargo_mutant("replace * with + in checked", "CaughtMutant", "checked", 5, line=6)]
+        self.assertEqual(gate._cargo_mutants_survivors("engine/", outcomes), [gate._finding(
+            "engine/src/lib.rs", 9, "survived",
+            "1 of 3 mutants of `unchecked` survived its tests: line 10: replace > with == in unchecked.")])
+
+    def test_a_finding_shows_the_first_examples_only(self):
+        outcomes = [cargo_mutant(f"replace > with {op} in unchecked", "MissedMutant") for op in "<=>!"]
+        [finding] = gate._cargo_mutants_survivors("", outcomes)
+        self.assertEqual(finding["message"].count("replace"), gate._SURVIVOR_EXAMPLES)
+        self.assertTrue(finding["message"].startswith("4 of 4 mutants of `unchecked` survived its tests: "))
+
+    def test_unreadable_outcomes_are_a_problem(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIn("outcomes.json", gate._cargo_mutants_outcomes(d)[1])
+            with open(os.path.join(d, "outcomes.json"), "w") as f:
+                json.dump({"outcomes": [{"scenario": "Baseline"}]}, f)
+            self.assertEqual(gate._cargo_mutants_outcomes(d)[0], [])
+            with open(os.path.join(d, "outcomes.json"), "w") as f:
+                json.dump({"outcomes": [{"scenario": "Baseline", "summary": "Success"}]}, f)
+            self.assertEqual(gate._cargo_mutants_outcomes(d), ([{"scenario": "Baseline", "summary": "Success"}], None))
+
+    def test_the_diff_cargo_mutants_reads_is_the_workspace_s_files_from_its_directory(self):
+        diff = ("diff --git a/ui/src/a.rs b/ui/src/a.rs\n--- a/ui/src/a.rs\n+++ b/ui/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n"
+                "diff --git a/gate.py b/gate.py\n--- a/gate.py\n+++ b/gate.py\n@@ -1 +1 @@\n-x\n+y\n")
+        self.assertEqual(gate._diff_under(diff, "ui", ["ui/src/a.rs"]),
+                         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n")
+        self.assertEqual(gate._diff_under(diff, "", ["gate.py"]), diff.partition("diff --git a/gate.py")[1]
+                         + diff.partition("diff --git a/gate.py")[2])
+        # A line of the file that reads like a path under the workspace is the file's, and stays.
+        code = diff.replace("+y\n", '+let p = "a/ui/b/ui/";\n', 1)
+        self.assertIn('+let p = "a/ui/b/ui/";\n', gate._diff_under(code, "ui", ["ui/src/a.rs"]))
+
+    @unittest.skipUnless(CARGO, "cargo, which tells a package's workspace, is not on PATH")
+    def test_the_workspace_is_the_one_cargo_tells(self):
+        with tempfile.TemporaryDirectory() as d:
+            package = "\nversion = '0.1.0'\nedition = '2021'\n"
+            for path, text in [("Cargo.toml", "[workspace]\nmembers = ['engine']\nexclude = ['tools/x']\n"),
+                               ("engine/Cargo.toml", "[package]\nname = 'engine'" + package),
+                               ("engine/src/lib.rs", ""),
+                               ("tools/x/Cargo.toml", "[package]\nname = 'x'" + package),
+                               ("tools/x/src/main.rs", "fn main() {}\n")]:
+                os.makedirs(os.path.dirname(os.path.join(d, path)), exist_ok=True)
+                with open(os.path.join(d, path), "w") as f:
+                    f.write(text)
+            self.assertEqual(gate._cargo_root(d, "engine/src/lib.rs"), ("", ""))
+            os.remove(os.path.join(d, "Cargo.toml"))
+            self.assertEqual(gate._cargo_root(d, "engine/src/lib.rs"), ("engine", ""))
+            self.assertEqual(gate._cargo_root(d, "tools/x/src/main.rs"), ("tools/x", ""))
+            self.assertEqual(gate._cargo_root(d, "src/lib.rs"), (None, "no Cargo.toml lies above it"))
+
+    def test_cargo_mutants_skip_is_a_suppression(self):
+        for line in ["#[mutants::skip]", "#[cfg_attr(test, mutants::skip)]", "    #[mutants::skip] fn f() {}",
+                     "    mutants::skip", "    mutants::skip,"]:
+            with self.subTest(line):
+                self.assertTrue(gate._RUST_SUPPRESSION.search(line))
+        self.assertFalse(gate._RUST_SUPPRESSION.search("let mutants = skip(1);"))
+
+
+@unittest.skipUnless(CARGO and shutil.which("cargo-mutants") and shutil.which("cargo-nextest"),
+                     "the Rust half of surviving-mutants runs cargo mutants with nextest, and cargo, cargo-mutants or "
+                     "cargo-nextest is not on PATH")
+class TestRustSurvivingMutants(RepositoryTest):
+    """The surviving-mutants check over a real git repository's Cargo package, with a real cargo-mutants."""
+
+    LIB = "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n"
+
+    BASE_FILES = {
+        "Cargo.toml": '[package]\nname = "calc"\nversion = "0.1.0"\nedition = "2021"\n',
+        "Cargo.lock": 'version = 4\n\n[[package]]\nname = "calc"\nversion = "0.1.0"\n',
+        ".gitignore": "target/\n",
+        "src/lib.rs": LIB,
+    }
+
+    # checked's tests notice every mutant; unchecked's call it and check nothing.
+    ADDED = ("\npub fn checked(a: u32) -> u32 {\n    a * 2\n}\n\n"
+             "pub fn unchecked(a: u32) -> bool {\n    a > 3\n}\n")
+    TESTS = ("#[test]\nfn checks() {\n    SLEEP\n    assert_eq!(calc::checked(3), 6);\n    assert_eq!(calc::checked(0), 0);\n}\n\n"
+             "#[test]\nfn calls() {\n    calc::unchecked(1);\n}\n")
+
+    def found(self, budget=gate.MUTATION_BUDGET, sleep=""):
+        """(path, line, rule, message) of each of the check's findings on the change that adds checked and unchecked
+        and their tests, the tests sleeping as sleep, a statement, says."""
+        self.put("src/lib.rs", self.LIB + self.ADDED)
+        self.put("tests/calc.rs", self.TESTS.replace("SLEEP", sleep))
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        return [(f["path"], f["line"], f["rule"], f["message"])
+                for f in gate.surviving_mutants(change, budget=budget)]
+
+    def test_a_function_whose_mutants_survive_is_found_and_one_whose_mutants_are_caught_is_not(self):
+        [(path, line, rule, message)] = self.found()
+        self.assertEqual((path, line, rule), ("src/lib.rs", 9, "survived"))
+        self.assertRegex(message, r"^5 of 5 mutants of `unchecked` survived its tests: line 10: replace ")
+
+    def test_the_budget_running_out_is_a_finding(self):
+        # Each run of the tests takes 2 seconds, so the 20 seconds, less the stop's grace, end after a few mutants.
+        found = self.found(budget=gate.MUTMUT_STOP_GRACE + gate.TOOL_KILL_WAIT + 5,
+                           sleep="std::thread::sleep(std::time::Duration::from_secs(2));")
+        [message] = [m for p, n, r, m in found if r == "budget-reached"]
+        self.assertRegex(message, r"^budget reached after \d+ of the mutants cargo-mutants made of the workspace at `\.`")
+
+    def test_a_change_without_rust_never_starts_cargo_mutants(self):
+        self.put("notes.md", "notes\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        with patch.object(gate, "_cargo_mutants_on_copy") as run:
+            self.assertEqual(gate.surviving_mutants(change, budget=gate.MUTATION_BUDGET), [])
+        run.assert_not_called()
+
+    def test_added_lines_with_nothing_to_mutate_give_nothing(self):
+        self.put("src/lib.rs", self.LIB + "\npub const LIMIT: u32 = 4;\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(gate.surviving_mutants(change, budget=gate.MUTATION_BUDGET), [])
+
+
 class TestSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
 

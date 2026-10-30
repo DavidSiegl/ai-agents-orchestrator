@@ -372,6 +372,31 @@ skips every expression that starts on a matching line, with all it holds, so a t
 so is a whole `add_argument(...)` or `add_parser(...)` call that starts on its `help=` or `description=` line. A change
 to such a text alone makes no mutant. Flag names that start a line of their own are still mutated.
 
+**Rust's mutants.** After mutmut, with what is left of the one `--mutation-budget`, the check mutation-tests the Rust a
+change adds lines to outside the tests (a `.rs` file of a Cargo package, as for test integrity) with
+[cargo-mutants](https://mutants.rs/). When the change has Rust to mutate, mutmut gets half the budget, and
+cargo-mutants the rest, with whatever mutmut left unused; a change with no Python functions to mutate gives
+cargo-mutants all of it. cargo-mutants chooses what to mutate itself: it runs `--in-diff` with the change's diff of the workspace's
+`.rs` files, which mutates only what the added lines hold, `--in-place` in the gate's copy of the files git tracks,
+once per Cargo workspace (that of the nearest `Cargo.toml` above the file, as `cargo locate-project` tells it),
+with `--test-tool nextest` and `--timeout 60` for each mutant's tests. Its outcomes, from `mutants.out/outcomes.json`,
+count as mutmut's do: a missed mutant survived; a caught one, and a timeout, did not; an unviable one, which does not
+build, was not tried. Added lines with nothing to mutate, such as a `use` or a `const`, give nothing. The findings are
+mutmut's kinds:
+
+- `survived`: a function with missed mutants, at the line its `fn` starts, with how many of its tried mutants survived
+  and the first three, each by its line and cargo-mutants' description, such as `replace > with == in unchecked`;
+- `budget-reached`: the budget ran out, before cargo-mutants started (it needs the 15 seconds of its stop, as mutmut
+  does) or while it ran, with how many mutants it had tried; the workspaces after it are `not-run`;
+- `not-run`: cargo-mutants could not start, wrote no outcomes the gate can read, or found the unmutated baseline not
+  passing, as for tests that fail or code that does not build in the copy; or the copy could not be made;
+- `not-mutated`: a changed `.rs` file with no `Cargo.toml` above it, or one whose workspace cargo cannot tell;
+- `not-removed`: the copy could not be removed afterwards; the findings stand.
+
+cargo-mutants' own skip attribute, `#[mutants::skip]`, also inside a `cfg_attr`, wrapped or not, is a suppression: the quality file
+lists the change's, as it lists an `#[allow(...)]`. The copy has no `target/`, so each run builds the workspace and its
+dependencies anew within the budget (see `TODO.md`).
+
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
@@ -774,9 +799,11 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
-  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
+  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
   for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
-  tests at the base, into the workspace's `.tools/bin`, which the Jenkinsfile puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  tests at the base, and of cargo-mutants, for the surviving-mutants check's Rust, into the workspace's `.tools/bin`,
+  which the Jenkinsfile puts first on `PATH`. cargo-mutants releases only a glibc build for linux x86_64, so the agent
+  image's glibc must be one it runs on. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
   Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`
