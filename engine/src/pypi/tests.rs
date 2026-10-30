@@ -6,7 +6,7 @@ use super::fake::{FakePyPI, ProjectJson};
 use super::*;
 use crate::http::Response;
 
-fn project(answer: Result<Response, HttpError>) -> Result<Option<PyPIProject>, PyPIError> {
+fn project(answer: Result<Response, HttpError>) -> Result<Option<IndexedPackage>, IndexError> {
     struct Once(Mutex<Option<Result<Response, HttpError>>>);
     impl Http for Once {
         fn send(&self, request: &Request) -> Result<Response, HttpError> {
@@ -153,9 +153,9 @@ fn an_upload_time_reads_in_every_form_fromisoformat_reads() {
         ("0001-01-01T00:00Z", -62_135_596_800.0, "0001-01-01"),
     ];
     for (time, at, date) in cases {
-        assert_eq!(upload_of(time), Ok(Upload { at, date: date.to_string() }), "{time}");
+        assert_eq!(Upload::from_iso(time), Ok(Upload { at, date: date.to_string() }), "{time}");
     }
-    assert_eq!(upload_of("20261003").map(|u| u.date), Ok("2026-10-03".to_string()));
+    assert_eq!(Upload::from_iso("20261003").map(|u| u.date), Ok("2026-10-03".to_string()));
     let text = r#"{"info": {"version": "1"}, "urls": [{"upload_time_iso_8601": "2026-10-28T12:00:00,7Z"},
         {"upload_time_iso_8601": "2026-10-28T12:00:00,5Z"}]}"#;
     assert_eq!(project(body(text)).unwrap().unwrap().latest_release.unwrap().at, 1_793_188_800.5);
@@ -169,7 +169,6 @@ fn a_name_is_quoted_into_its_url() {
     fake.state().down = true;
     assert_eq!(
         PyPI::new(fake).project("x").unwrap_err(),
-        PyPIError("GET https://pypi.org/pypi/x/json: timed out".to_string())
+        IndexError("GET https://pypi.org/pypi/x/json: timed out".to_string())
     );
-    let _ = PyPI::from_env();
 }

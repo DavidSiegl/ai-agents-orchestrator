@@ -85,6 +85,8 @@ pub const HTTP_TIMEOUT: u64 = 30;
 /// Seconds each blocking step of a request to PyPI may take, to connect or to read, so one request can take it more
 /// than once. What bounds the new-dependencies check as a whole is the quality round's deadline (SLOW_STEP_MARGIN).
 pub const PYPI_TIMEOUT: u64 = 15;
+/// The same for a request to crates.io.
+pub const CRATES_IO_TIMEOUT: u64 = 15;
 /// Seconds between two looks at a quality build.
 pub const CI_POLL_SECONDS: u64 = 10;
 /// How long one quality round may wait on Jenkins, failed requests retried, before the run fails. Seconds.

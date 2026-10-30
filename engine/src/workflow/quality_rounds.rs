@@ -440,7 +440,7 @@ impl<'a> Workflow<'a> {
         let files = host.changed_line_counts(&work_dir, &base, sha)?;
         let file_at = |commit: &str, path: &str| host.file_at(&work_dir, commit, path);
         let now = self.clocks.wall();
-        let checks = orchestrator_checks(&pipeline, self.pypi);
+        let checks = orchestrator_checks(&pipeline, self.indexes);
         let stopped: RefCell<Option<Stopped>> = RefCell::new(None);
         let me = RefCell::new(self);
         let in_time = || {

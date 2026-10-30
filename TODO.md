@@ -67,19 +67,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
   still lacks is under Open issues.
 
-- **The gate judges Rust as it judges Python: the rest of it.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). The
-  helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
-  "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
-  Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
-  it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
-  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30), and `vague-names` reads its
-  `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`), and `passes-at-base` runs the changed Rust tests at the
-  base with cargo-nextest (ticket 05, 2026-10-30: `_rust_passes_at_base`), and `surviving-mutants` mutation-tests
-  the Rust a change adds with cargo-mutants (ticket 06, 2026-10-30: `_cargo_mutants_on_copy`); their blind spots are
-  under Open issues. Left: a Cargo ecosystem for `new-dependencies` after the switch (07). Decided against (2026-10-29, the user's): a Rust counterpart of
-  `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
-  `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
-
 ## Open issues
 
 - **A prompt template's `.attribute` is an error in the Rust engine, where Python filled it in.** `crate::py::format`,
@@ -839,6 +826,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The gate judges Rust as it judges Python.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). Fixed (2026-10-30,
+  every ticket of it). The helper the checks read Rust through: `ci/gate-rust/`, a crate on syn whose JSON
+  (docs/quality-gate.md, "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py
+  --rust-syntax`, which the Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity`
+  reads Rust's tests through it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of
+  `WEAKENED_TESTS_DETECTORS`), and `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03,
+  2026-10-30), and `vague-names` reads its `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`), and
+  `passes-at-base` runs the changed Rust tests at the base with cargo-nextest (ticket 05, 2026-10-30:
+  `_rust_passes_at_base`), and `surviving-mutants` mutation-tests the Rust a change adds with cargo-mutants (ticket
+  06, 2026-10-30: `_cargo_mutants_on_copy`); their blind spots are under Open issues. And `new-dependencies` reads a
+  Cargo workspace's manifests and asks crates.io about its new crates (ticket 07, 2026-10-30: `cargo_dependencies`,
+  the Cargo entry of `DEPENDENCY_ECOSYSTEMS`, and `CratesIo`, a `PackageIndex` beside `PyPI`). Decided against
+  (2026-10-29, the user's): a Rust counterpart of `flaky-tests`, since nextest runs each test in a process of its own,
+  so the reruns under other seeds that `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 - **The surviving-mutants check selects functions by added lines only.** A Python function whose edit only removed
   lines was not mutation-tested, unlike flaky-tests' selection (`_edits_test`). Fixed (2026-10-30, gate-open-decisions
   ticket 03, the user's decision of 2026-10-28): `_changed_python_functions` selects with `_edits_function`, which

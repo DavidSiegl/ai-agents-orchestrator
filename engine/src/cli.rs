@@ -22,7 +22,7 @@ use crate::interrupt::Interrupt;
 use crate::pipeline::Pipeline;
 use crate::py::text::shlex_join;
 use crate::py::json::Json;
-use crate::pypi::PyPI;
+use crate::package_index::PackageIndexes;
 use crate::runs::{local_host, pid_alive};
 use crate::spec_file::{read_spec_file, SpecFile};
 use crate::state::RunState;
@@ -288,7 +288,7 @@ fn connect(command: &Command, local: &Local, human: &LocalHuman) -> Result<Ended
         None => local.host.clone(),
     };
     let clocks = SystemClocks::new(interrupt).map_err(stopped)?;
-    let pypi = PyPI::from_env();
+    let indexes = PackageIndexes::from_env();
     let jenkins = |job: &str| Jenkins::from_env(job, config);
     let here = local_host();
     let world = Connected {
@@ -300,7 +300,7 @@ fn connect(command: &Command, local: &Local, human: &LocalHuman) -> Result<Ended
             interrupt,
             pid_alive: &pid_alive,
             jenkins: None,
-            pypi: &pypi,
+            indexes: &indexes,
         },
         jenkins: &jenkins,
         config,

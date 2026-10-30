@@ -643,7 +643,9 @@ fn a_proof_runs_on_the_worktrees_code_and_the_commit_holds_no_copy_of_it() {
         interrupt: &interrupt,
         pid_alive: &crate::runs::pid_alive,
         jenkins: None,
-        pypi: &crate::pypi::PyPI::new(crate::pypi::fake::FakePyPI::from_json(Default::default())),
+        indexes: &crate::package_index::PackageIndexes::with_pypi(crate::pypi::fake::FakePyPI::from_json(
+            Default::default(),
+        )),
     };
     let mut wf = crate::workflow::Workflow::new(with, state.clone(), settings(&proving(), 3)).unwrap();
     // Ignores the checkout's .orchestrator directory and owns the run, as a run's start does.

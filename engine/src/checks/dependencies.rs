@@ -1,9 +1,10 @@
-//! The new-dependencies check: the packages a change adds to the project, judged against the spec and PyPI, and the
-//! readers of the manifests that say what a project depends on (docs/quality-gate.md, "New dependencies"). The
-//! projects are Python projects with uv, as the gate's targets are.
+//! The new-dependencies check: the packages a change adds to the project, judged against the spec and the package
+//! index of their ecosystem, and the readers of the manifests that say what a project depends on
+//! (docs/quality-gate.md, "New dependencies"). The projects are Python projects with uv, whose index is PyPI, and
+//! Cargo workspaces, whose index is crates.io.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ::toml::{Table, Value};
 
@@ -12,7 +13,7 @@ use crate::error::OrchestratorError;
 use crate::py::json::Map;
 use crate::py::text::{is_space, utf8_error};
 use crate::py::toml::{hashable, json_dumps, loads, python_type, repr, same_key, str as py_str, truthy};
-use crate::pypi::{PyPI, PyPIProject};
+use crate::package_index::{IndexedPackage, PackageIndex, PackageIndexes};
 
 /// A new dependency whose first release is fewer days old than this is flagged: few have used it yet, and a name
 /// registered for the occasion is the slopsquatting move.
@@ -25,7 +26,7 @@ pub const PYPI_INDEX_URL: &str = "https://pypi.org/simple";
 /// RunChange::file_at's.
 pub type ReadFile<'a> = dyn Fn(&str) -> Result<Option<Vec<u8>>, OrchestratorError> + 'a;
 
-/// The kinds of place a package comes from other than PyPI, as uv's sources name them.
+/// The kinds of place a package comes from other than its ecosystem's index, as uv's sources name them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceKind {
     /// A member of the project's workspace.
@@ -33,13 +34,13 @@ pub enum SourceKind {
     Path,
     Git,
     Url,
-    /// An index other than PyPI's.
+    /// An index other than the ecosystem's own, or a Cargo registry other than crates.io.
     Index,
     /// A uv source of a shape this reader does not know.
     Unknown,
 }
 
-/// Where a package comes from when it is not PyPI.
+/// Where a package comes from when it is not its ecosystem's index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageSource {
     pub kind: SourceKind,
@@ -53,57 +54,79 @@ impl PackageSource {
         PackageSource { kind, place: place.into() }
     }
 
-    /// Where it comes from, as a finding says it.
-    pub fn describe(&self) -> String {
+    /// Where it comes from, as a finding says it, index being the name of the index it does not come from.
+    pub fn describe(&self, index: &str) -> String {
         let place = &self.place;
         match self.kind {
-            SourceKind::Workspace => "a member of the project's workspace, not from PyPI".to_string(),
-            SourceKind::Index => format!("from the index {place}, not checked against PyPI"),
+            SourceKind::Workspace => format!("a member of the project's workspace, not from {index}"),
+            SourceKind::Index => format!("from the index {place}, not checked against {index}"),
             SourceKind::Unknown => {
                 format!(
                     "from the uv source {place}, which this check does not know, so where it comes from is not checked"
                 )
             }
-            SourceKind::Path => format!("from the path {place}, not from PyPI"),
-            SourceKind::Git => format!("from the repository {place}, not from PyPI"),
-            SourceKind::Url => format!("from {place}, not from PyPI"),
+            SourceKind::Path => format!("from the path {place}, not from {index}"),
+            SourceKind::Git => format!("from the repository {place}, not from {index}"),
+            SourceKind::Url => format!("from {place}, not from {index}"),
         }
     }
 }
 
-/// Packages by package_key, each with where it comes from, None for PyPI.
+/// Packages by package_key, each with where it comes from, None for the ecosystem's index: what one manifest names.
 pub type Sources = Map<Option<PackageSource>>;
 
-/// What a project's manifests say it depends on: each package by package_key, with where it comes from, None for
-/// PyPI.
+/// A package a project depends on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dependency {
+    /// Where it comes from; None for the ecosystem's index.
+    pub source: Option<PackageSource>,
+    /// The manifest that names it, by its path from the top level; for a locked package, the lock file. Of a package
+    /// several manifests name, the first the ecosystem reads.
+    pub manifest: String,
+}
+
+/// What a project's manifests say it depends on, each package by package_key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dependencies {
     /// The project's own choice, which the spec must name.
-    pub direct: Sources,
+    pub direct: Map<Dependency>,
     /// Every package its lock file pins, the project and its workspace aside.
-    pub locked: Sources,
+    pub locked: Map<Dependency>,
     /// Why, by path, for each manifest that cannot be read; direct and locked then come from the others only.
     pub unreadable: Map<String>,
 }
 
-/// A kind of project's dependency manifests, at the repository's top level, and how to read them. Manifests anywhere
-/// else, such as test fixtures, are not the project's.
+/// A kind of project's dependency manifests, from the repository's top level, how to read them, and the index its
+/// packages come from. Manifests anywhere else, such as test fixtures, are not the project's.
 pub struct DependencyEcosystem {
-    /// The file that lists the project's own dependencies.
-    pub manifest: &'static str,
-    /// The file beside it that pins every package they pull in.
-    pub lock_file: &'static str,
+    /// Whether a change to the file at path, from the top level, may change what the project depends on: whether it
+    /// is, or may be, one of the manifests read reads.
+    pub reads: fn(&str) -> bool,
     /// The project's Dependencies, given each file by its path; each manifest it cannot read is in their
     /// unreadable, and the others are still read. Errors: the reader's.
     pub read: fn(&ReadFile) -> Result<Dependencies, OrchestratorError>,
+    /// The index of indexes that its packages come from, unless their source says otherwise.
+    pub index: fn(&PackageIndexes) -> &dyn PackageIndex,
 }
 
-/// The ecosystems whose new packages the new-dependencies check judges. Python's so far, whose index is PyPI; another
-/// ecosystem's needs its own index too.
-pub const DEPENDENCY_ECOSYSTEMS: [DependencyEcosystem; 1] =
-    [DependencyEcosystem { manifest: "pyproject.toml", lock_file: "uv.lock", read: python_dependencies }];
+/// The ecosystems whose new packages the new-dependencies check judges: Python's, with uv, whose index is PyPI, and
+/// Rust's, with Cargo, whose index is crates.io.
+pub const DEPENDENCY_ECOSYSTEMS: [DependencyEcosystem; 2] = [
+    DependencyEcosystem {
+        reads: |path| path == "pyproject.toml" || path == "uv.lock",
+        read: python_dependencies,
+        index: |indexes| &indexes.pypi,
+    },
+    DependencyEcosystem {
+        // Any Cargo.toml, since a workspace's members can be anywhere below the top level.
+        reads: |path| path == "Cargo.lock" || path == "Cargo.toml" || path.ends_with("/Cargo.toml"),
+        read: cargo_dependencies,
+        index: |indexes| &indexes.crates_io,
+    },
+];
 
-/// A Python package's name as PyPI compares names (PEP 503): lower case, each run of -, _ and . one -.
+/// A Python package's name as PyPI compares names (PEP 503): lower case, each run of -, _ and . one -. A crate's
+/// name, which holds no ., too: crates.io takes - and _ for each other, case aside.
 pub fn package_key(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut in_run = false;
@@ -130,22 +153,32 @@ pub fn package_key(name: &str) -> String {
 pub fn python_dependencies(read: &ReadFile) -> Result<Dependencies, OrchestratorError> {
     let mut found = Dependencies::default();
     match toml_manifest(read, "uv.lock")?.and_then(|lock| uv_lock_packages(&lock)) {
-        Ok(locked) => found.locked = locked,
+        Ok(locked) => add_named(&mut found.locked, locked, "uv.lock"),
         Err(why) => found.unreadable.insert("uv.lock", why),
     }
     match toml_manifest(read, "pyproject.toml")?.and_then(|pyproject| pyproject_dependencies(&pyproject)) {
         Ok(direct) => {
-            found.direct = direct
+            let direct = direct
                 .into_iter()
                 .map(|(key, source)| {
-                    let source = source.or_else(|| found.locked.get(&key).cloned().flatten());
+                    let source = source.or_else(|| found.locked.get(&key).and_then(|d| d.source.clone()));
                     (key, source)
                 })
                 .collect();
+            add_named(&mut found.direct, direct, "pyproject.toml");
         }
         Err(why) => found.unreadable.insert("pyproject.toml", why),
     }
     Ok(found)
+}
+
+/// Adds to packages each of sources that it does not hold yet, as named by the manifest at path.
+fn add_named(packages: &mut Map<Dependency>, sources: Sources, path: &str) {
+    for (key, source) in sources {
+        if !packages.contains_key(&key) {
+            packages.insert(key, Dependency { source, manifest: path.to_string() });
+        }
+    }
 }
 
 /// The table of the TOML file at path; an empty one where there is none; why not, for one that is not UTF-8, as
@@ -366,41 +399,243 @@ fn requirement_of(requirement: &Value) -> Result<(String, Option<String>), Strin
     Ok((package_key(name), url))
 }
 
+/// crates.io's index as Cargo.lock names it: the git index, and the sparse one Cargo has used by default since 1.70.
+const CRATES_IO_INDEXES: [&str; 2] = ["https://github.com/rust-lang/crates.io-index", "https://index.crates.io/"];
+
+/// The tables of a Cargo manifest, at its top level and under each `[target.<cfg>]`, that list dependencies, the
+/// underscore forms being what Cargo before the 2024 edition also reads.
+const CARGO_DEPENDENCY_TABLES: [&str; 5] =
+    ["dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies", "build_dependencies"];
+
+/// DependencyEcosystem::read of a Rust project with Cargo.
+///
+/// Its direct dependencies are those of the top-level Cargo.toml and of each manifest its `[workspace] members` names
+/// (one by its path, not a glob, which this reader does not expand), in each CARGO_DEPENDENCY_TABLES table and its
+/// `[target.<cfg>]` forms, and its `[workspace.dependencies]`, each by its crate's name (its `package` when it renames
+/// the crate). A dependency's source is its entry's: `path`, a member of the workspace; `git`; `registry` or
+/// `registry-index`, an index other than crates.io; else crates.io. One that takes `workspace = true` has the
+/// `[workspace.dependencies]` entry's. The locked packages are Cargo.lock's that come from a registry or a repository,
+/// the workspace's own crates and the others it has from a path left out.
+pub fn cargo_dependencies(read: &ReadFile) -> Result<Dependencies, OrchestratorError> {
+    let mut found = Dependencies::default();
+    match toml_manifest(read, "Cargo.lock")?.and_then(|lock| cargo_lock_packages(&lock)) {
+        Ok(locked) => add_named(&mut found.locked, locked, "Cargo.lock"),
+        Err(why) => found.unreadable.insert("Cargo.lock", why),
+    }
+    let root = match toml_manifest(read, "Cargo.toml")? {
+        Ok(root) => root,
+        Err(why) => {
+            found.unreadable.insert("Cargo.toml", why);
+            return Ok(found);
+        }
+    };
+    let workspace = match workspace_of(&root) {
+        Ok(workspace) => workspace,
+        Err(why) => {
+            found.unreadable.insert("Cargo.toml", why);
+            return Ok(found);
+        }
+    };
+    match cargo_manifest_dependencies(&root, &workspace.shared) {
+        Ok(direct) => {
+            add_named(&mut found.direct, direct, "Cargo.toml");
+            add_named(&mut found.direct, workspace.shared.values().cloned().collect(), "Cargo.toml");
+        }
+        Err(why) => found.unreadable.insert("Cargo.toml", why),
+    }
+    for member in &workspace.members {
+        let path = format!("{member}/Cargo.toml");
+        let manifest = match read(&path)? {
+            None => Err("the workspace names it a member, but it does not exist".to_string()),
+            Some(_) => toml_manifest(read, &path)?,
+        };
+        match manifest.and_then(|manifest| cargo_manifest_dependencies(&manifest, &workspace.shared)) {
+            Ok(direct) => add_named(&mut found.direct, direct, &path),
+            Err(why) => found.unreadable.insert(path, why),
+        }
+    }
+    Ok(found)
+}
+
+/// What a top-level Cargo.toml's `[workspace]` says.
+struct CargoWorkspace {
+    /// Each member's directory from the top level, without a trailing /; the top level itself left out.
+    members: Vec<String>,
+    /// `[workspace.dependencies]`: by each entry's name, its crate's package_key and source.
+    shared: Map<(String, Option<PackageSource>)>,
+}
+
+/// The CargoWorkspace of the parsed top-level Cargo.toml root, which has none when root has no `[workspace]`; why
+/// not, for one of another shape.
+fn workspace_of(root: &Table) -> Result<CargoWorkspace, String> {
+    let workspace = toml_table(root, "workspace")?;
+    let mut shared = Map::new();
+    for (name, entry) in toml_table(workspace, "dependencies")? {
+        shared.insert(name, cargo_entry(name, entry, "[workspace.dependencies]")?);
+    }
+    let excluded = string_list(workspace, "exclude", "[workspace] exclude")?;
+    let mut members = Vec::new();
+    for member in string_list(workspace, "members", "[workspace] members")? {
+        if member.contains(['*', '?', '[']) {
+            return Err(format!("its workspace member `{member}` is a glob, which this check does not expand"));
+        }
+        let member = member.trim_end_matches('/').trim_start_matches("./");
+        if !member.is_empty() && member != "." && !excluded.iter().any(|e| e.trim_end_matches('/') == member) {
+            members.push(member.to_string());
+        }
+    }
+    Ok(CargoWorkspace { members, shared })
+}
+
+/// The strings of the list table[key], none when it has no such key; why not, naming it as place, when it is not a
+/// list of strings.
+fn string_list<'a>(table: &'a Table, key: &str, place: &str) -> Result<Vec<&'a str>, String> {
+    match table.get(key) {
+        None => Ok(Vec::new()),
+        Some(Value::Array(items)) => {
+            items.iter().map(|i| i.as_str().ok_or(format!("{place} is not a list of strings"))).collect()
+        }
+        Some(_) => Err(format!("{place} is not a list of strings")),
+    }
+}
+
+/// The dependencies of a parsed Cargo manifest, as cargo_dependencies reads them, given its workspace's shared
+/// `[workspace.dependencies]`; why not, for one of another shape.
+fn cargo_manifest_dependencies(
+    manifest: &Table,
+    shared: &Map<(String, Option<PackageSource>)>,
+) -> Result<Sources, String> {
+    let mut tables = Vec::new();
+    for table in CARGO_DEPENDENCY_TABLES {
+        tables.push((format!("[{table}]"), toml_table(manifest, table)?));
+    }
+    for (cfg, target) in toml_table(manifest, "target")? {
+        let Value::Table(target) = target else { return Err(format!("[target.{cfg}] is not a table")) };
+        for table in CARGO_DEPENDENCY_TABLES {
+            tables.push((format!("[target.{cfg}.{table}]"), toml_table(target, table)?));
+        }
+    }
+    let mut out = Map::new();
+    for (place, table) in tables {
+        for (name, entry) in table {
+            let inherits = entry.as_table().and_then(|t| t.get("workspace")) == Some(&Value::Boolean(true));
+            let (key, source) = if inherits {
+                shared.get(name).cloned().ok_or_else(|| {
+                    format!(
+                        "`{name}` in {place} takes `workspace = true`, but [workspace.dependencies] has no `{name}`"
+                    )
+                })?
+            } else {
+                cargo_entry(name, entry, &place)?
+            };
+            if !out.contains_key(&key) {
+                out.insert(key, source);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The package_key of the crate that the dependency entry, under name in the table at place, names, and where it
+/// comes from, as cargo_dependencies says; why not, for an entry that is neither a version nor a table.
+fn cargo_entry(name: &str, entry: &Value, place: &str) -> Result<(String, Option<PackageSource>), String> {
+    let table = match entry {
+        Value::String(_) => return Ok((package_key(name), None)),
+        Value::Table(table) => table,
+        _ => return Err(format!("`{name}` in {place} is neither a version nor a table")),
+    };
+    let crate_name = match table.get("package") {
+        None => name,
+        Some(Value::String(package)) => package,
+        Some(_) => return Err(format!("`{name}` in {place} has a package that is not a string")),
+    };
+    let source = if table.contains_key("path") {
+        Some(PackageSource::new(SourceKind::Workspace, ""))
+    } else if let Some(git) = table.get("git") {
+        Some(PackageSource::new(SourceKind::Git, py_str(git)))
+    } else {
+        table
+            .get("registry-index")
+            .or_else(|| table.get("registry"))
+            .map(|registry| PackageSource::new(SourceKind::Index, py_str(registry)))
+    };
+    Ok((package_key(crate_name), source))
+}
+
+/// cargo_dependencies's locked packages of a Cargo.lock, parsed; why not, for one of another shape.
+fn cargo_lock_packages(lock: &Table) -> Result<Sources, String> {
+    let refused = || "[[package]] is not a list of tables with a name".to_string();
+    let packages = match lock.get("package") {
+        None => return Ok(Map::new()),
+        Some(Value::Array(packages)) => packages,
+        Some(_) => return Err(refused()),
+    };
+    let mut out = Map::new();
+    for package in packages {
+        let package = package.as_table().ok_or_else(refused)?;
+        let name = package.get("name").and_then(Value::as_str).ok_or_else(refused)?;
+        // A package without a source is one of the workspace's own crates, or one it has from a path.
+        let Some(source) = package.get("source") else { continue };
+        let Some(source) = source.as_str() else { return Err(format!("the source of `{name}` is not a string")) };
+        out.insert(package_key(name), cargo_lock_source(source));
+    }
+    Ok(out)
+}
+
+/// The PackageSource of a Cargo.lock package's source, `registry+URL`, `sparse+URL` or `git+URL#commit`; None for
+/// crates.io. A repository's commit is left out of its place, so that a change of commit is no change of source.
+fn cargo_lock_source(source: &str) -> Option<PackageSource> {
+    if let Some(repository) = source.strip_prefix("git+") {
+        let repository = repository.split_once('#').map_or(repository, |(url, _)| url);
+        return Some(PackageSource::new(SourceKind::Git, repository));
+    }
+    let index = source.strip_prefix("registry+").or_else(|| source.strip_prefix("sparse+")).unwrap_or(source);
+    (!CRATES_IO_INDEXES.contains(&index)).then(|| PackageSource::new(SourceKind::Index, index))
+}
+
 /// A package a project depends on after the change and not before it.
-#[derive(Clone, Debug)]
-struct NewPackage {
+#[derive(Clone)]
+struct NewPackage<'a> {
     key: String,
-    /// The manifest that names it: its ecosystem's manifest for a direct one, else its lock file.
-    path: &'static str,
+    /// The manifest that names it, Dependency::manifest.
+    path: String,
     /// The first line the change added to it that names the package; None when none does.
     line: Option<u64>,
     /// One of Dependencies::direct; else a package the lock file alone adds.
     direct: bool,
-    /// None for PyPI.
+    /// None for index.
     source: Option<PackageSource>,
+    /// Its ecosystem's index.
+    index: &'a dyn PackageIndex,
 }
 
-/// The packages that the change adds to a DEPENDENCY_ECOSYSTEMS project, each from PyPI asked of pypi.
+/// What ask_indexes learned: by (PackageIndex::name, package_key), what the index knows of the package, None for one
+/// it does not know. A package missing from it was not asked about.
+type Known = BTreeMap<(&'static str, String), Option<IndexedPackage>>;
+
+/// The packages that the change adds to a DEPENDENCY_ECOSYSTEMS project, each from its ecosystem's index asked of
+/// indexes.
 ///
 /// Fails a direct dependency the spec does not name (spec_names), unless it is a member of the project's workspace;
-/// a package PyPI does not know; those PyPI could not be asked about; and a manifest in the change that cannot be
-/// read. Reports a direct dependency the spec names, or a workspace member, with where it comes from: what PyPI knows
-/// of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old, or its source, other-index for an
-/// index other than PyPI's; the packages a lock file alone adds, those the direct ones pull in, in one finding per
-/// lock file; a dependency of the base's that the change takes from another source (source-changed); and a manifest
-/// that cannot be read at the base, which leaves its ecosystem unchecked. PyPI is asked only while change.in_time(),
-/// and no more after the first request it gives no usable answer to. Errors: change.file_at's.
-pub fn new_dependencies(change: &RunChange, pypi: &PyPI) -> Result<CheckFindings, OrchestratorError> {
-    let (packages, mut found) = new_packages(change)?;
-    let (known, failure) = ask_pypi(&packages, pypi, change.in_time);
+/// a package its index does not know (PackageIndex::unknown_rule); those an index could not be asked about, in one
+/// unchecked finding per index; and a manifest in the change that cannot be read. Reports a direct dependency the
+/// spec names, or a workspace member, with where it comes from: what its index knows of it, flagged when its first
+/// release is under YOUNG_PACKAGE_DAYS days old, or its source, other-index for another index; the packages a lock
+/// file alone adds, those the direct ones pull in, in one finding per lock file; a dependency of the base's that the
+/// change takes from another source (source-changed); and a manifest that cannot be read at the base, which leaves its
+/// ecosystem unchecked. An index is asked only while change.in_time(), and no more after the first request it gives
+/// no usable answer to. Errors: change.file_at's.
+pub fn new_dependencies(change: &RunChange, indexes: &PackageIndexes) -> Result<CheckFindings, OrchestratorError> {
+    let (packages, mut found) = new_packages(change, indexes)?;
+    let (known, failures) = ask_indexes(&packages, change.in_time);
     let named = spec_names(&change.spec);
     let mut pulled_in: Map<Vec<String>> = Map::new();
     for p in &packages {
-        if !p.direct && (p.source.is_some() || known.get(&p.key).is_some_and(Option::is_some)) {
+        if !p.direct && (p.source.is_some() || known_of(&known, p).is_some_and(Option::is_some)) {
             let described = format!("`{}` ({})", p.key, whence(p, &known, change.now, ""));
-            match pulled_in.get_mut(p.path) {
+            match pulled_in.get_mut(&p.path) {
                 Some(list) => list.push(described),
-                None => pulled_in.insert(p.path, vec![described]),
+                None => pulled_in.insert(p.path.as_str(), vec![described]),
             }
         } else if let Some((fails, finding)) = package_finding(p, &named, &known, change.now) {
             if fails { &mut found.issues } else { &mut found.to_weigh }.push(finding);
@@ -414,70 +649,73 @@ pub fn new_dependencies(change: &RunChange, pypi: &PyPI) -> Result<CheckFindings
         );
         found.to_weigh.push(Finding::warning(Some(path), None, "pulled-in", message));
     }
-    found.issues.extend(unchecked_finding(&packages, &known, failure));
+    found.issues.extend(unchecked_findings(&packages, &known, &failures));
     Ok(found)
 }
 
-/// The unchecked finding new_dependencies fails the gate with: it names, once each and in the order of packages, those
-/// of packages from PyPI that ask_pypi did not ask about, known being what it learned, and gives failure, its reason
-/// for stopping. None when PyPI was asked about every one.
-fn unchecked_finding(
-    packages: &[NewPackage],
-    known: &Map<Option<PyPIProject>>,
-    failure: Option<String>,
-) -> Option<Finding> {
-    let mut unasked: Vec<&str> = Vec::new();
-    for p in packages.iter().filter(|p| p.source.is_none() && !known.contains_key(&p.key)) {
-        if !unasked.contains(&p.key.as_str()) {
-            unasked.push(&p.key);
+/// What known holds of package p: None when its index was not asked about it, Some(None) when the index does not know
+/// it.
+fn known_of<'k>(known: &'k Known, p: &NewPackage) -> Option<&'k Option<IndexedPackage>> {
+    known.get(&(p.index.name(), p.key.clone()))
+}
+
+/// The unchecked findings new_dependencies fails the gate with, one per index that ask_indexes did not ask about each
+/// of packages from it: it names, once each and in the order of packages, those it was not asked about, known being
+/// what ask_indexes learned, and gives the index's entry of failures, its reason for stopping.
+fn unchecked_findings(packages: &[NewPackage], known: &Known, failures: &Map<String>) -> Vec<Finding> {
+    let mut unasked: Map<Vec<&str>> = Map::new();
+    for p in packages.iter().filter(|p| p.source.is_none() && known_of(known, p).is_none()) {
+        match unasked.get_mut(p.index.name()) {
+            Some(keys) if keys.contains(&p.key.as_str()) => {}
+            Some(keys) => keys.push(&p.key),
+            None => unasked.insert(p.index.name(), vec![p.key.as_str()]),
         }
     }
-    if unasked.is_empty() {
-        return None;
-    }
-    let names: Vec<String> = unasked.iter().map(|k| format!("`{k}`")).collect();
-    let message = format!(
-        "PyPI could not be asked about {}: {}; whether they exist is not known.",
-        names.join(", "),
-        failure.unwrap_or_default()
-    );
-    Some(Finding::error(None, None, "unchecked", message))
+    unasked
+        .iter()
+        .map(|(index, keys)| {
+            let names: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+            let message = format!(
+                "{index} could not be asked about {}: {}; whether they exist is not known.",
+                names.join(", "),
+                failures.get(index).map_or("", String::as_str)
+            );
+            Finding::error(None, None, "unchecked", message)
+        })
+        .collect()
 }
 
 /// Whether new_dependencies's finding on package p fails the gate, and the finding; None for a package of a lock
-/// file that comes from elsewhere than PyPI or that PyPI knows, which is described with the others the lock file
-/// adds, or one that PyPI was not asked about, which is unchecked.
-fn package_finding(
-    p: &NewPackage,
-    named: &BTreeSet<String>,
-    known: &Map<Option<PyPIProject>>,
-    now: f64,
-) -> Option<(bool, Finding)> {
+/// file that comes from elsewhere than its index or that its index knows, which is described with the others the lock
+/// file adds, or one that its index was not asked about, which is unchecked.
+fn package_finding(p: &NewPackage, named: &BTreeSet<String>, known: &Known, now: f64) -> Option<(bool, Finding)> {
     let member = p.source.as_ref().is_some_and(|s| s.kind == SourceKind::Workspace);
     let in_spec = named.contains(&p.key);
+    let path = Some(p.path.as_str());
     if p.direct && !in_spec && !member {
         let message =
             format!("`{}` is a new dependency that the spec does not name{}.", p.key, whence(p, known, now, "; "));
-        return Some((true, Finding::error(Some(p.path), p.line, "not-in-spec", message)));
+        return Some((true, Finding::error(path, p.line, "not-in-spec", message)));
     }
-    if matches!(known.get(&p.key), Some(None)) {
+    let index = p.index.name();
+    if matches!(known_of(known, p), Some(None)) {
         let message = format!(
-            "PyPI does not know `{}`: the name may be mistyped, or name a package that does not exist yet, which \
+            "{index} does not know `{}`: the name may be mistyped, or name a package that does not exist yet, which \
              anyone could register (slopsquatting).",
             p.key
         );
-        return Some((true, Finding::error(Some(p.path), p.line, "not-on-pypi", message)));
+        return Some((true, Finding::error(path, p.line, p.index.unknown_rule(), message)));
     }
-    if p.direct && (p.source.is_some() || known.contains_key(&p.key)) {
+    if p.direct && (p.source.is_some() || known_of(known, p).is_some()) {
         let rule = match p.source.as_ref().map(|s| s.kind) {
             Some(SourceKind::Index) => "other-index",
             Some(SourceKind::Unknown) => "unknown-source",
-            _ if known.get(&p.key).cloned().flatten().is_some_and(|project| young(&project, now)) => "young",
+            _ if known_of(known, p).cloned().flatten().is_some_and(|package| young(&package, now)) => "young",
             _ => "added",
         };
         let spec = if in_spec { ", which the spec names" } else { "" };
         let message = format!("`{}`{spec}: {}.", p.key, whence(p, known, now, ""));
-        return Some((false, Finding::warning(Some(p.path), p.line, rule, message)));
+        return Some((false, Finding::warning(path, p.line, rule, message)));
     }
     None
 }
@@ -497,12 +735,17 @@ pub fn spec_names(spec: &str) -> BTreeSet<String> {
     names
 }
 
-/// The packages the change adds to each DEPENDENCY_ECOSYSTEMS project whose manifest or lock file it touches, direct
-/// ones first; and in found, an unreadable finding for each manifest that cannot be read, which leaves its project
-/// unchecked: failing when the change made it so, and to weigh when it cannot be read at the base either, with a
-/// source-changed finding to weigh for each package that moved.
-fn new_packages(change: &RunChange) -> Result<(Vec<NewPackage>, CheckFindings), OrchestratorError> {
-    let touched = |path: &str| change.files.iter().any(|f| f.path == path || f.base_path == path);
+/// The packages the change adds to each DEPENDENCY_ECOSYSTEMS project whose files it touches (DependencyEcosystem::
+/// reads), direct ones first, each with its ecosystem's index of indexes; and in found, an unreadable finding for each
+/// manifest that cannot be read, which leaves its project unchecked: failing when the change made it so, and to weigh
+/// when it cannot be read at the base either, with a source-changed finding to weigh for each package that moved.
+fn new_packages<'a>(
+    change: &RunChange,
+    indexes: &'a PackageIndexes,
+) -> Result<(Vec<NewPackage<'a>>, CheckFindings), OrchestratorError> {
+    let touched = |ecosystem: &DependencyEcosystem| {
+        change.files.iter().any(|f| (ecosystem.reads)(&f.path) || (ecosystem.reads)(&f.base_path))
+    };
     let mut packages = Vec::new();
     let mut found = CheckFindings::default();
     // Read once, for the ecosystem and for the lines that name its packages.
@@ -515,11 +758,8 @@ fn new_packages(change: &RunChange) -> Result<(Vec<NewPackage>, CheckFindings), 
         read_files.borrow_mut().insert(path, text.clone());
         Ok(text)
     };
-    for ecosystem in &DEPENDENCY_ECOSYSTEMS {
-        if !touched(ecosystem.manifest) && !touched(ecosystem.lock_file) {
-            continue;
-        }
-        // Both sides at the top level, where the project's manifests are: a file the change moves there was not the
+    for ecosystem in DEPENDENCY_ECOSYSTEMS.iter().filter(|ecosystem| touched(ecosystem)) {
+        // Both sides from the top level, where the project's manifests are: a file the change moves there was not the
         // project's at the base.
         let after = (ecosystem.read)(&new_text)?;
         let before = (ecosystem.read)(&|path: &str| (change.file_at)(&change.base, path))?;
@@ -531,12 +771,12 @@ fn new_packages(change: &RunChange) -> Result<(Vec<NewPackage>, CheckFindings), 
             found.to_weigh.push(unreadable(path, why, "at the base", false));
         }
         if after.unreadable.is_empty() && before.unreadable.is_empty() {
-            let text =
-                new_text(ecosystem.manifest)?.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            let empty = BTreeSet::new();
-            let added = change.changed.get(ecosystem.manifest).unwrap_or(&empty);
-            let line_naming = |key: &str| line_naming(&text, added, key);
-            let (new, moved) = compare_dependencies(ecosystem, &before, &after, &line_naming);
+            let mut added_line = |manifest: &str, key: &str| -> Result<Option<u64>, OrchestratorError> {
+                let Some(added) = change.changed.get(manifest) else { return Ok(None) };
+                let text = new_text(manifest)?.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+                Ok(line_naming(&text, added, key))
+            };
+            let (new, moved) = compare_dependencies((ecosystem.index)(indexes), &before, &after, &mut added_line)?;
             packages.extend(new);
             found.to_weigh.extend(moved);
         }
@@ -545,60 +785,61 @@ fn new_packages(change: &RunChange) -> Result<(Vec<NewPackage>, CheckFindings), 
     Ok((packages, found))
 }
 
+/// The first line the change added to the manifest at path that names the package key, by (path, key); None when
+/// none does. Errors: RunChange::file_at's.
+type AddedLine<'a> = dyn FnMut(&str, &str) -> Result<Option<u64>, OrchestratorError> + 'a;
+
 /// The packages the project depends on after and not before, a package of its direct dependencies counted as one of
-/// them only; and a source-changed finding to weigh for each that it depended on before from another source.
-/// line_naming gives the added line of the manifest that names a package, by its key.
-fn compare_dependencies(
-    ecosystem: &DependencyEcosystem,
+/// them only, each from index unless its source says otherwise; and a source-changed finding to weigh for each that
+/// it depended on before from another source. Errors: added_line's.
+fn compare_dependencies<'a>(
+    index: &'a dyn PackageIndex,
     before: &Dependencies,
     after: &Dependencies,
-    line_naming: &dyn Fn(&str) -> Option<u64>,
-) -> (Vec<NewPackage>, Vec<Finding>) {
-    let lock_only: Sources =
+    added_line: &mut AddedLine,
+) -> Result<(Vec<NewPackage<'a>>, Vec<Finding>), OrchestratorError> {
+    let lock_only: Map<Dependency> =
         after.locked.iter().filter(|(key, _)| !after.direct.contains_key(key)).map(|(k, v)| (k, v.clone())).collect();
-    let mut new: Vec<NewPackage> = after
-        .direct
-        .iter()
-        .filter(|(key, _)| !before.direct.contains_key(key))
-        .map(|(key, source)| NewPackage {
+    let mut new = Vec::new();
+    for (key, dependency) in after.direct.iter().filter(|(key, _)| !before.direct.contains_key(key)) {
+        new.push(NewPackage {
             key: key.to_string(),
-            path: ecosystem.manifest,
-            line: line_naming(key),
+            path: dependency.manifest.clone(),
+            line: added_line(&dependency.manifest, key)?,
             direct: true,
-            source: source.clone(),
-        })
-        .collect();
-    new.extend(lock_only.iter().filter(|(key, _)| !before.locked.contains_key(key)).map(|(key, source)| NewPackage {
-        key: key.to_string(),
-        path: ecosystem.lock_file,
-        line: None,
-        direct: false,
-        source: source.clone(),
+            source: dependency.source.clone(),
+            index,
+        });
+    }
+    new.extend(lock_only.iter().filter(|(key, _)| !before.locked.contains_key(key)).map(|(key, dependency)| {
+        NewPackage {
+            key: key.to_string(),
+            path: dependency.manifest.clone(),
+            line: None,
+            direct: false,
+            source: dependency.source.clone(),
+            index,
+        }
     }));
     let mut moved = Vec::new();
-    let sides = [
-        (ecosystem.manifest, &before.direct, &after.direct, true),
-        (ecosystem.lock_file, &before.locked, &lock_only, false),
-    ];
-    for (path, was, now, has_lines) in sides {
-        for (key, source) in now.iter() {
-            if let Some(old) = was.get(key).filter(|old| *old != source) {
-                let message =
-                    format!("`{key}`: at the base, {}; in the change, {}.", source_text(old), source_text(source));
-                moved.push(Finding::warning(
-                    Some(path),
-                    if has_lines { line_naming(key) } else { None },
-                    "source-changed",
-                    message,
-                ));
+    for (was, now, has_lines) in [(&before.direct, &after.direct, true), (&before.locked, &lock_only, false)] {
+        for (key, dependency) in now.iter() {
+            if let Some(old) = was.get(key).filter(|old| old.source != dependency.source) {
+                let message = format!(
+                    "`{key}`: at the base, {}; in the change, {}.",
+                    source_text(&old.source, index),
+                    source_text(&dependency.source, index)
+                );
+                let line = if has_lines { added_line(&dependency.manifest, key)? } else { None };
+                moved.push(Finding::warning(Some(&dependency.manifest), line, "source-changed", message));
             }
         }
     }
-    (new, moved)
+    Ok((new, moved))
 }
 
-fn source_text(source: &Option<PackageSource>) -> String {
-    source.as_ref().map_or_else(|| "from PyPI".to_string(), PackageSource::describe)
+fn source_text(source: &Option<PackageSource>, index: &dyn PackageIndex) -> String {
+    source.as_ref().map_or_else(|| format!("from {}", index.name()), |s| s.describe(index.name()))
 }
 
 fn unreadable(path: &str, why: &str, place: &str, fails: bool) -> Finding {
@@ -659,58 +900,63 @@ fn match_parts(text: &str, parts: &[&str]) -> Option<usize> {
     Some(at)
 }
 
-/// What pypi knows of each package from PyPI, by key, None for one it does not know; and why the rest were not asked:
-/// in_time() said no before a request, or pypi gave no usable answer to one, which leaves that one and every later
-/// one out.
-fn ask_pypi(
-    packages: &[NewPackage],
-    pypi: &PyPI,
-    in_time: &dyn Fn() -> bool,
-) -> (Map<Option<PyPIProject>>, Option<String>) {
-    let mut known = Map::new();
+/// What each package's index knows of it, of those from their index; and why an index was not asked about the rest
+/// of its packages, by its name: in_time() said no before a request, which leaves every later one of every index
+/// out, or the index gave no usable answer to one, which leaves that one and every later one of the index out.
+fn ask_indexes(packages: &[NewPackage], in_time: &dyn Fn() -> bool) -> (Known, Map<String>) {
+    let mut known = Known::new();
+    let mut failures: Map<String> = Map::new();
+    let mut out_of_time = false;
     for p in packages.iter().filter(|p| p.source.is_none()) {
-        if known.contains_key(&p.key) {
+        let index = p.index.name();
+        if failures.contains_key(index) || known_of(&known, p).is_some() {
             continue;
         }
-        if !in_time() {
-            return (known, Some("the quality round had too little time left to ask".to_string()));
+        out_of_time = out_of_time || !in_time();
+        if out_of_time {
+            failures.insert(index, "the quality round had too little time left to ask".to_string());
+            continue;
         }
-        match pypi.project(&p.key) {
-            Ok(project) => known.insert(p.key.as_str(), project),
-            Err(e) => return (known, Some(e.to_string())),
+        match p.index.package(&p.key) {
+            Ok(package) => {
+                known.insert((index, p.key.clone()), package);
+            }
+            Err(e) => failures.insert(index, e.to_string()),
         }
     }
-    (known, None)
+    (known, failures)
 }
 
-/// Where package p comes from, after lead: its source, or what PyPI knows of it; "" when PyPI was not asked.
-fn whence(p: &NewPackage, known: &Map<Option<PyPIProject>>, now: f64, lead: &str) -> String {
+/// Where package p comes from, after lead: its source, or what its index knows of it; "" when the index was not
+/// asked.
+fn whence(p: &NewPackage, known: &Known, now: f64, lead: &str) -> String {
+    let index = p.index.name();
     if let Some(source) = &p.source {
-        return format!("{lead}{}", source.describe());
+        return format!("{lead}{}", source.describe(index));
     }
-    match known.get(&p.key) {
+    match known_of(known, p) {
         None => String::new(),
-        Some(None) => format!("{lead}PyPI does not know it either"),
-        Some(Some(project)) => {
-            let since = project
+        Some(None) => format!("{lead}{index} does not know it either"),
+        Some(Some(package)) => {
+            let since = package
                 .first_release
                 .as_ref()
                 .map_or_else(|| "with no release files".to_string(), |u| format!("since {}", u.date));
-            let latest = project.latest_release.as_ref().map_or_else(String::new, |u| format!(" of {}", u.date));
-            let young = if young(project, now) {
+            let latest = package.latest_release.as_ref().map_or_else(String::new, |u| format!(" of {}", u.date));
+            let young = if young(package, now) {
                 format!("; it is younger than {YOUNG_PACKAGE_DAYS} days, so few have used it yet")
             } else {
                 String::new()
             };
-            let license = project.license.as_deref().unwrap_or("not stated");
-            format!("{lead}on PyPI {since}, latest {}{latest}, license {license}{young}", project.version)
+            let license = package.license.as_deref().unwrap_or("not stated");
+            format!("{lead}on {index} {since}, latest {}{latest}, license {license}{young}", package.version)
         }
     }
 }
 
-/// Whether the project's first release is under YOUNG_PACKAGE_DAYS days before now; one with none is.
-fn young(project: &PyPIProject, now: f64) -> bool {
-    project.first_release.as_ref().is_none_or(|first| now - first.at < (YOUNG_PACKAGE_DAYS * 86_400) as f64)
+/// Whether the package's first release is under YOUNG_PACKAGE_DAYS days before now; one with none is.
+fn young(package: &IndexedPackage, now: f64) -> bool {
+    package.first_release.as_ref().is_none_or(|first| now - first.at < (YOUNG_PACKAGE_DAYS * 86_400) as f64)
 }
 
 #[cfg(test)]

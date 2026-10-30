@@ -4,13 +4,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::constants::PYPI_TIMEOUT;
+use crate::constants::{CRATES_IO_TIMEOUT, PYPI_TIMEOUT};
 use crate::error::OrchestratorError;
 use crate::handoff::labelled_word;
 use crate::host::ChangedFile;
 use crate::pipeline::Pipeline;
 use crate::py::text::{basename, decimal_value, strip};
-use crate::pypi::PyPI;
+use crate::package_index::PackageIndexes;
 use crate::quality::{
     one_line, QUALITY_ERROR, QUALITY_FAILED_CONDITIONS, QUALITY_FINDINGS_LIMIT, QUALITY_OK, QUALITY_TO_WEIGH_NOTE,
 };
@@ -20,8 +20,9 @@ pub mod dependencies;
 pub use dependencies::new_dependencies;
 
 /// Seconds of a quality round's QUALITY_TIMEOUT that an orchestrator check leaves unused: it starts no slow step,
-/// such as a request to PyPI, with less left. A request can take PYPI_TIMEOUT more than once, to connect and to read.
-pub const SLOW_STEP_MARGIN: u64 = 4 * PYPI_TIMEOUT;
+/// such as a request to a package index, with less left. A request can take PYPI_TIMEOUT, or CRATES_IO_TIMEOUT, more
+/// than once, to connect and to read.
+pub const SLOW_STEP_MARGIN: u64 = 4 * if PYPI_TIMEOUT > CRATES_IO_TIMEOUT { PYPI_TIMEOUT } else { CRATES_IO_TIMEOUT };
 
 /// Reads a file of the change: (commit, path) to the file at path, relative to the repository's top level, as
 /// commit has it, its bytes as git stores them; None where it has none. Errors: git fails on the agents' machine.
@@ -44,7 +45,7 @@ pub struct RunChange<'a> {
     pub file_at: &'a FileAt<'a>,
     /// When the round judges it, in seconds since the epoch.
     pub now: f64,
-    /// Called before each step of a check that may be slow, such as a request to PyPI: it keeps the run's heartbeat
+    /// Called before each step of a check that may be slow, such as a request to a package index: it keeps the run's heartbeat
     /// going, and is false once the quality round has too little time left to start one (SLOW_STEP_MARGIN).
     pub in_time: &'a dyn Fn() -> bool,
 }
@@ -124,12 +125,12 @@ pub struct OrchestratorCheck<'a> {
     pub find: Box<Find<'a>>,
 }
 
-/// The checks a quality round of a run of pipeline runs, in this order: the new dependencies, which it asks pypi
+/// The checks a quality round of a run of pipeline runs, in this order: the new dependencies, which it asks indexes
 /// about; the change's size against the workflow's max_files and max_lines; and its paths against the spec.
-pub fn orchestrator_checks<'a>(pipeline: &Pipeline, pypi: &'a PyPI) -> Vec<OrchestratorCheck<'a>> {
+pub fn orchestrator_checks<'a>(pipeline: &Pipeline, indexes: &'a PackageIndexes) -> Vec<OrchestratorCheck<'a>> {
     let (max_files, max_lines) = (pipeline.max_files(), pipeline.max_lines());
     vec![
-        OrchestratorCheck { name: "new-dependencies", find: Box::new(move |change| new_dependencies(change, pypi)) },
+        OrchestratorCheck { name: "new-dependencies", find: Box::new(move |change| new_dependencies(change, indexes)) },
         OrchestratorCheck {
             name: "diff-budget",
             find: Box::new(move |change| Ok(diff_budget(change, max_files, max_lines))),
