@@ -1730,21 +1730,25 @@ class TestWeakenedTests(RepositoryTest):
 
     def test_a_golden_file_rewritten_with_the_code_it_pins_is_an_expected_value_changed(self):
         self.commit({"tests/golden/sum.txt": "3\n", "tests/golden/old.txt": "1\n", "tests/golden/moved.txt": "2\n",
-                     "docs/golden/notes.txt": "a\n"}, "golden files")
+                     "tests/golden/cut.txt": "1\n2\n", "docs/golden/notes.txt": "a\n"}, "golden files")
         self.edit("calc.py", "return a + b", "return b + a")
         self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.edit("tests/golden/cut.txt", "1\n2\n", "1\n")  # lines removed, none added
         self.git("rm", "--quiet", "tests/golden/old.txt")
         self.git("mv", "tests/golden/moved.txt", "tests/golden/kept.txt")  # its expected value unchanged
         self.put("tests/golden/new.txt", "5\n")  # a new expected value, not a changed one
         self.edit("docs/golden/notes.txt", "a\n", "b\n")  # no test reads it
         self.git("add", "tests/golden/new.txt")
         where, found = self.found()
-        self.assertEqual(where, [("tests/golden/old.txt", None, "expected-value-changed"),
+        self.assertEqual(where, [("tests/golden/cut.txt", None, "expected-value-changed"),
+                                 ("tests/golden/old.txt", None, "expected-value-changed"),
                                  ("tests/golden/sum.txt", None, "expected-value-changed")])
-        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, changed in a change that "
+        self.assertEqual(found[2]["message"], "a golden file, the expected output of a test, changed in a change that "
                                               "also edits the code under test; check that its diff is what the change "
                                               "means the output to become.")
-        self.assertIn("deleted", found[0]["message"])
+        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, deleted in a change that "
+                                              "also edits the code under test; check that no test still needs it.")
+        self.assertEqual({f["severity"] for f in found}, {"error"})
 
     def test_a_golden_file_rewritten_with_a_python_script_it_pins_is_an_expected_value_changed(self):
         self.commit({"tests/golden/tool.txt": "3\n", "bin/tool": "#!/usr/bin/env python3\nprint(3)\n",
@@ -1814,7 +1818,18 @@ class TestWeakenedTests(RepositoryTest):
             f.write(b"def test_a():\n    assert '\xff'\n")
         where, found = self.found()
         self.assertEqual(where, [("tests/test_other.py", None, "unreadable")])
-        self.assertIn("so its tests were not checked", found[0]["message"])
+        self.assertEqual((found[0]["severity"], found[0]["message"]),
+                         ("error", ("could not be read, so its tests were not checked: 'utf-8' codec can't decode byte "
+                                   "0xff in position 26: invalid start byte")))
+        self.git("add", "-A")
+        # Too unlike the base's to be taken for a rename: the base's file is removed, and an unreadable one added.
+        self.git("mv", "tests/test_other.py", "tests/test_moved.py")
+        self.assertEqual(self.found()[0], [("tests/test_moved.py", None, "unreadable"),
+                                           ("tests/test_other.py", None, "removed-test")])
+
+    def test_a_test_file_renamed_unedited_loses_no_test(self):
+        self.git("mv", "tests/test_other.py", "tests/test_moved.py")
+        self.assertEqual(self.found()[0], [])
 
     def test_a_removed_helper_class_is_not_a_test(self):
         self.put("tests/test_help.py", "class Helper:\n    def make(self):\n        return 1\n")
@@ -2722,6 +2737,44 @@ class TestPassesAtBase(RepositoryTest):
         self.assertRegex(left["message"], r"^could not remove the directory to run the changed tests at the base in, "
                                           r"`.+`: .*Permission denied")
 
+    def test_a_base_that_cannot_be_copied_is_a_finding(self):
+        self.fix_add()
+        with patch.object(gate, "_copy_base_with_tests", side_effect=OSError("no space")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not copy the base to run the changed tests in: no space; the changed tests "
+                                   "were not run there."))])
+
+    def test_an_empty_configuration_that_cannot_be_written_is_a_finding(self):
+        self.git("rm", "--quiet", "pytest.ini")
+        self.commit({}, "no pytest configuration")
+        self.fix_add()
+        with patch.object(gate, "_empty_pytest_ini", side_effect=OSError("no space")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not write an empty pytest configuration for the run at the base: no space; "
+                                   "the changed tests were not run there."))])
+
+    def test_tests_with_no_pytest_configuration_run_at_the_base_with_an_empty_one(self):
+        self.git("rm", "--quiet", "pytest.ini")
+        self.commit({}, "no pytest configuration")
+        self.fix_add("\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
+
+    def test_the_run_at_the_base_has_a_tmpdir_of_its_own_and_the_gate_s_pythonpath_after_the_copy(self):
+        extra = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, extra)
+        with open(os.path.join(extra, "extra_mod.py"), "w") as f:
+            f.write("TWO = 2\n")
+        # Each passes only in the run at the base: its TMPDIR lies beside the copy it runs in, which is its cwd.
+        self.fix_add("\n\ndef test_tmpdir():\n    import os\n"
+                     "    assert os.path.dirname(os.environ['TMPDIR']) == os.path.dirname(os.getcwd())\n"
+                     "\n\ndef test_inherited_path():\n    from extra_mod import TWO\n    assert mul(TWO, 1) == 2\n")
+        with patch.dict("os.environ", {"PYTHONPATH": extra}):
+            found = self.found()
+        self.assertEqual([(f["line"], f["rule"]) for f in found], [(12, "passes-at-base"), (17, "passes-at-base")])
+
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
         self.assertEqual(self.found(), [])
@@ -3098,6 +3151,17 @@ class TestPassesAtBase(RepositoryTest):
                               "it, if any does, was not judged: `vendor/lib`, which is not initialised in the working "
                               "tree."))])
 
+    def test_two_submodules_not_initialised_are_one_finding(self):
+        self.add_submodule()
+        url = self.git("config", "-f", ".gitmodules", "submodule.vendor/lib.url").strip()
+        self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", url, "vendor/two")
+        self.git("commit", "--quiet", "-m", "a second submodule")
+        self.git("submodule", "--quiet", "deinit", "--force", "--all")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves submodules empty, so a changed test that imports from "
+                              "them, if any does, was not judged: `vendor/lib`, which is not initialised in the "
+                              "working tree; `vendor/two`, which is not initialised in the working tree."))])
+
     def test_a_submodule_marked_export_ignore_stays_out_of_the_copy(self):
         self.add_submodule()
         self.put(".gitattributes", "vendor/lib export-ignore\n")
@@ -3163,6 +3227,18 @@ class TestPassesAtBase(RepositoryTest):
         self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
         self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
 
+    def test_a_module_imported_through_a_tracked_link_out_of_the_tree_gets_no_bytecode_there(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside)
+        with open(os.path.join(outside, "far.py"), "w") as f:
+            f.write("ONE = 1\n")
+        os.symlink(outside, os.path.join(self.repo, "far"))
+        self.git("add", "far")
+        self.git("commit", "--quiet", "-m", "link")
+        self.fix_add("\n\ndef test_far():\n    from far.far import ONE\n    assert mul(ONE, 1) == 1\n")
+        self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
+        self.assertEqual(os.listdir(outside), ["far.py"])
+
     def test_a_run_that_cannot_start_is_a_finding(self):
         self.fix_add()
         with patch.object(gate.sys, "executable", os.path.join(self.repo, "no-python")):
@@ -3173,8 +3249,16 @@ class TestPassesAtBase(RepositoryTest):
     def test_an_unparsable_test_file_is_a_finding(self):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/test_calc.py", self.TESTS + "def test_new(:\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in self.found()],
+                         [("tests/test_calc.py", None, "not-run",
+                           "does not parse as Python, so its tests were not run at the base.")])
+
+    def test_an_unparsable_test_file_leaves_the_others_judged(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.put("tests/test_broken.py", "def test_new(:\n")
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
-                         [("tests/test_calc.py", None, "not-run")])
+                         [("tests/test_broken.py", None, "not-run"), ("tests/test_calc.py", 8, "passes-at-base")])
 
     def test_a_change_beside_the_tests_alone_is_not_run(self):
         # A conftest.py anywhere and any file under tests/ go with the tests, not with the code they test.
@@ -3262,7 +3346,32 @@ class TestRustPassesAtBase(RepositoryTest):
                                                                      "    fn doubles() {\n"
                                                                      "        assert_eq!(super::double(2), 4);\n"
                                                                      "    }\n}\n")
-        self.assertEqual(self.found(), [("src/lib.rs", self.fn_line("src/lib.rs", "doubles"), "not-run")])
+        # tests/calc.rs's test runs at the base all the same.
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [("src/lib.rs", self.fn_line("src/lib.rs", "doubles"), "not-run"),
+                                        ("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(gate.passes_at_base(change, budget=gate.BASE_RUN_BUDGET)[0]["message"],
+                         "`tests::doubles` is in an inline `#[cfg(test)]` module of a file the change also edits "
+                         "outside it, so it cannot be run apart from the code it tests, at the base.")
+
+    def test_no_room_for_the_run_at_the_base_is_a_finding(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        # Read before mkdtemp fails: the helper's copy of the base takes a directory too.
+        self.assertEqual(change.rust_files[1], [])
+        with patch.object(gate.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = gate.passes_at_base(change, budget=gate.BASE_RUN_BUDGET)
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run the changed Rust tests at the base in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
+
+    def test_a_target_names_its_selection_and_package_in_prose(self):
+        self.assertEqual(gate._RustTarget("", ("--test", "cli"), ()).label(),
+                         "`--test cli` of the package at the top level")
+        self.assertEqual(gate._RustTarget("engine", ("--lib",), ("calc",)).label(),
+                         "`--lib` of the package at `engine`")
 
     def test_a_test_whose_first_attribute_the_change_removes_is_run(self):
         self.rebase({"tests/calc.rs": "#[ignore]\n#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n"},
@@ -3586,6 +3695,11 @@ class TestCargoMutantsOutcomes(unittest.TestCase):
             self.assertEqual(gate._cargo_root(d, "engine/src/lib.rs"), ("engine", ""))
             self.assertEqual(gate._cargo_root(d, "tools/x/src/main.rs"), ("tools/x", ""))
             self.assertEqual(gate._cargo_root(d, "src/lib.rs"), (None, "no Cargo.toml lies above it"))
+
+    def test_a_workspace_cargo_cannot_tell_is_a_condition_naming_the_tool_that_needs_it(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict("os.environ", {"PATH": d}):
+            self.assertEqual(gate._cargo_workspaces(d, ["engine/Cargo.toml"], "cargo-mutants"),
+                             ([], ["`cargo-mutants` is not installed: `cargo` is not on PATH."]))
 
     def test_cargo_mutants_skip_is_a_suppression(self):
         for line in ["#[mutants::skip]", "#[cfg_attr(test, mutants::skip)]", "    #[mutants::skip] fn f() {}",
