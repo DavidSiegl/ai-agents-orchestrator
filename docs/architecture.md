@@ -42,7 +42,7 @@ ported from. By module:
 
 Its tests are each module's `<module>/tests.rs`, the Python tests of those parts ported case for case, and checks
 against the Python engine as the oracle: `engine/tests/oracle/` holds what the Python engine gave for the engine's
-inputs, each `.json` written by a generator that ran it, removed with it, and the parity recordings (`tests/parity/recorded/`) are read as they are: every `state.json` they hold
+inputs, each `.json` written by a generator that ran it, removed with it, and the e2e recordings (`engine/e2e/recorded/`) are read as they are: every `state.json` they hold
 reads into `RunState` and writes back byte for byte, every workflow the repository defines parses to the Python
 engine's definition, every recorded run's commit note, trailers, pull request body, `summary.md` and
 `metrics.json` come out as the Python engine wrote them, and every prompt the scenarios recorded is made of the
@@ -315,6 +315,17 @@ run either engine left resumes in the other. `PARITY_RECORD=1` writes recordings
 a scenario added since, whose recording is then a review of what the engine does. `PARITY_COMMANDS` (`run,resume`,
 say) leaves out each scenario whose recording invokes the engine with another command. A kill ends the engine's
 group and each process below it, since the engine runs each command in a group of its own.
+
+`engine/e2e/` (package `octoflow-e2e`) is that harness in Rust, replacing it scenario by scenario
+(octoflow-without-python tickets 01 and 02), and its scenarios replay the same recordings, `engine/e2e/recorded/`,
+which both harnesses read and neither changes. The fakes are `[[bin]]` targets of the package (`src/bin/`, their
+logic in `src/fakes.rs`), so that its test finds them by `CARGO_BIN_EXE_*`; they and the test share the ledger
+(`src/ledger.rs`, under `flock`) and the normalizer (`src/normalize.rs`), whose matchers are `normalize.py`'s regular
+expressions written out by hand, with their semantics. The test, `tests/e2e/`, holds the `World` and the scenarios,
+one `#[test]` each; it runs `E2E_ENGINE`'s binary when that is set, as Jenkins's Test stage sets it to the build it
+made for coverage, else builds the checkout's with cargo. `E2E_RECORD=1 cargo nextest run -p octoflow-e2e` writes
+recordings instead. So far the World serves neither Jenkins nor PyPI: the scenarios that need them, with kills, the
+quality gate and serve, come with ticket 02.
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the

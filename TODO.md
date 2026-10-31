@@ -29,35 +29,37 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`"), and the Jenkinsfile's cutover fallback is gone. Left: making the test-file patterns a setting,
   for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
   its own repository only once a second project uses it. Decided 2026-10-24.
-- **The parity harness: what it does not record.** `tests/parity/` runs 43 scenarios against the engine as a
-  program and compares each with its recording (docs/architecture.md, Tests). The recordings are the Python engine's,
-  made before rust-engine ticket 11 removed it, so none of what follows can be recorded from that oracle any more: a
-  scenario added for it records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks finds, at a quality round or at publish; the
-  harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
-  (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; the GUI, which the Rust
-  engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose templates only the
-  recorded `state.json` holds and whose text only golden files hold (`TestWorkflowPromptsGolden`, docs/architecture.md,
-  Tests), for the Python engine; and texts the engine sends or writes that neither a scenario nor a golden file reaches:
-  `CONTINUE_PROMPT`, `QUALITY_OFF_NOTE`, the pull request body of a run that ends `FINISHED` and of one whose gate was
-  turned off after its last analysis, and a body section cut at `PR_SECTION_LIMIT`. Each closes with a scenario recorded
-  from the Python engine (found by orchestrator-test-methods/06 and its review 74, 2026-10-27, against the recordings).
-  Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's certificate, every scenario fails naming it: a
-  skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip (the user's
-  ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-tools.sh`), and mutmut's
-  runs leave `tests/parity` out (`[tool.mutmut]`), which would take most of the mutation budget. What a record holds by
-  design, each a choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its
-  facts (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
-  list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what they
-  did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the `state.json`
-  saves between two commands, and serve's events between two checkpoints. The suite takes about 3 minutes more with the
-  harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream); when a quality build runs them
-  is the Jenkinsfile's Test stage's to say. Decided against (2026-10-27): scenarios as data files the harness
-  interprets, which needed a language of their own for kills, takeovers and serve's stream; a cassette of the expected
-  requests that the fakes answer in order, which breaks on every count of polls; and a stub gitleaks where none is
-  installed, which would record what no engine run with gitleaks does. Decided against too (2026-10-27,
-  orchestrator-test-methods/06): golden files of the engine's follow-up prompts, notes, commit messages and pull request
-  bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the frozen Python
-  engine, not the Rust one.
+- **The parity harness: what it does not record.** `tests/parity/` runs 43 scenarios against the engine as a program and
+  compares each with its recording (docs/architecture.md, Tests). `engine/e2e/` runs 26 of them in Rust against the same
+  recordings (octoflow-without-python/01); the others, which need Jenkins, PyPI, kills or serve, are ticket 02's, and
+  everything below holds for both harnesses. The recordings are the Python engine's, made before rust-engine ticket 11
+  removed it, so none of what follows can be recorded from that oracle any more: a scenario added for it records the
+  Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks finds, at a
+  quality round or at publish; the harnesses other than claude and codex starting an agent (only their arguments
+  differ); a session log's token counts (every turn records `unknown`); `--timeout` and the stall notice, which take
+  real minutes; the GUI, which the Rust engine drops; round 2 of the example workflows and a fresh session's prompts as
+  sent, whose templates only the recorded `state.json` holds and whose text only golden files hold
+  (`TestWorkflowPromptsGolden`, docs/architecture.md, Tests), for the Python engine; and texts the engine sends or
+  writes that neither a scenario nor a golden file reaches: `CONTINUE_PROMPT`, `QUALITY_OFF_NOTE`, the pull request body
+  of a run that ends `FINISHED` and of one whose gate was turned off after its last analysis, and a body section cut at
+  `PR_SECTION_LIMIT`. Each closes with a scenario recorded from the Python engine (found by orchestrator-test-methods/06
+  and its review 74, 2026-10-27, against the recordings). Where gitleaks is not on PATH, or openssl cannot make the fake
+  PyPI's certificate, every scenario fails naming it: a skip would pass a machine that checked nothing, and the gate's
+  test-integrity check fails an added skip (the user's ruling, 2026-10-27); Jenkins's Install stage downloads the pinned
+  gitleaks (`ci/install-tools.sh`), and mutmut's runs leave `tests/parity` out (`[tool.mutmut]`), which would take most
+  of the mutation budget. What a record holds by design, each a choice a Rust ticket may revisit: output a human reads
+  (logs, errors, `show`, `list`, `prune`) as its facts (`normalize.facts`), not its words; a run's files listed by
+  modification time, as `/files` and the event stream list them, sorted by name, since seconds of the clock decide that
+  order; ssh's commands not at all, only what they did; doctor's lines without git's and Tk's, which are the host's. Two
+  more are open issues below: the `state.json` saves between two commands, and serve's events between two checkpoints.
+  The suite takes about 3 minutes more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's
+  event stream); when a quality build runs them is the Jenkinsfile's Test stage's to say. Decided against (2026-10-27):
+  scenarios as data files the harness interprets, which needed a language of their own for kills, takeovers and serve's
+  stream; a cassette of the expected requests that the fakes answer in order, which breaks on every count of polls; and
+  a stub gitleaks where none is installed, which would record what no engine run with gitleaks does. Decided against too
+  (2026-10-27, orchestrator-test-methods/06): golden files of the engine's follow-up prompts, notes, commit messages and
+  pull request bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the
+  frozen Python engine, not the Rust one.
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
@@ -69,6 +71,22 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **new-dependencies on Cargo: two readings of a manifest that its doc does not state.** In
+  `engine/src/checks/dependencies.rs`, `cargo_manifest_dependencies` keeps the first entry of a crate across its tables,
+  as `add_named` does across manifests: `foo = "1"` in `[dependencies]` and `foo = { git = "..." }` under
+  `[target.'cfg(windows)'.dependencies]` record foo as from crates.io, and its git source is never compared with the
+  spec. And `cargo_member_entry` takes only boolean `true` as `workspace = true`: `workspace = "true"`, `1` or
+  `false` falls through to `cargo_entry` as a crates.io dependency, rather than being refused as an entry of another
+  shape. Raised, not recorded, by cross-review of 20aa212 (2026-10-30); both predate it. Closes with the rule chosen and
+  stated on `cargo_dependencies`'s doc: the first entry, or every source a crate is named with; and a non-boolean
+  `workspace` refused.
+- **`Map` has no first-wins insert.** `cargo_manifest_dependencies` and `add_named`
+  (`engine/src/checks/dependencies.rs`) each spell out `if !out.contains_key(&key) { out.insert(..) }`, a branch that
+  put the first at 16 of the gate's cognitive-complexity limit of 15 (PR #214), which 20aa212 met by moving the
+  `workspace = true` resolution into `cargo_member_entry` instead. Deferred from cross-review of 20aa212 (F1, nit,
+  2026-10-30): "A method there used at both sites would remove that branch from `cargo_manifest_dependencies` and keep
+  inheritance inline." Closes with ticket octoflow-without-python/04, which replaces `py::json::Map` with
+  `serde_json`'s map, whose `entry(..).or_insert(..)` both sites can take.
 - **serve's event stream can miss a finished run's last files.** `end_done_run` (`workflow.rs`) saves state.json
   with the owner cleared, which makes the run finished, before it writes summary.md and metrics.json, and `release`
   saves before summary.md likewise; `RunWatch::changes` (`serve/runs.rs`) reads a finished run's files again only

@@ -1,0 +1,32 @@
+[package]
+name = "octoflow-e2e"
+version = "0.1.0"
+description = "The engine's end-to-end scenarios: the orchestrator program run against fakes of herdr, gh and ssh"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# py::json, for the fakes' ledger and the recordings: objects that keep their keys' order and text written as
+# json.dumps writes it, which the recordings, made by the Python harness, hold byte for byte.
+octoflow-engine = { path = ".." }
+# The ledger's lock (flock), the world's kill of an invocation (signals) and the host's name, which the normalizer
+# writes as <host>: the engine's own dependency, with the fs feature for flock.
+nix = { version = "0.31", default-features = false, features = ["fs", "hostname", "signal"] }
+
+# The programs a world puts on the engine's PATH as herdr, gh and ssh (src/fakes.rs). They are binaries of this
+# package so that its tests find them by CARGO_BIN_EXE_*, which Cargo sets only for a test's own package.
+[[bin]]
+name = "fake-herdr"
+path = "src/bin/fake-herdr.rs"
+
+[[bin]]
+name = "fake-gh"
+path = "src/bin/fake-gh.rs"
+
+[[bin]]
+name = "fake-ssh"
+path = "src/bin/fake-ssh.rs"
+
+[lints]
+workspace = true

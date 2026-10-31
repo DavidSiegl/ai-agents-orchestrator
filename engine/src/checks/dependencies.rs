@@ -527,8 +527,10 @@ fn cargo_manifest_dependencies(
     Ok(out)
 }
 
-/// cargo_entry of a manifest's dependency entry, but for one that takes `workspace = true`, whose crate and source are
-/// shared's entry of the same name; why not, for an entry cargo_entry refuses or one shared does not have.
+/// The package_key of the crate that the dependency entry, under name in the table at place (its header, as an error
+/// names it), names, and where it comes from, None being crates.io: shared's entry of the same name for an entry that
+/// takes `workspace = true`, else what cargo_entry reads from it. Errors: why not, for an entry cargo_entry refuses or
+/// one that takes `workspace = true` when shared has no such name.
 fn cargo_member_entry(
     name: &str,
     entry: &Value,

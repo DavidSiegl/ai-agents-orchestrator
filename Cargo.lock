@@ -2151,6 +2151,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "octoflow-e2e"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "octoflow-engine",
+]
+
+[[package]]
 name = "octoflow-engine"
 version = "0.51.0"
 dependencies = [

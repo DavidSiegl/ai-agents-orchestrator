@@ -1,10 +1,10 @@
-"""The parity scenarios, each run against the engine and compared with its recording in recorded/.
+"""The parity scenarios, each run against the engine and compared with its recording in engine/e2e/recorded/.
 
-A scenario's record (World.record) must equal recorded/<name>.json; a difference fails the test, naming where the
-two first part. The recordings are the Python engine's, the oracle the Rust engine was ported against, made before
+A scenario's record (World.record) must equal engine/e2e/recorded/<name>.json; a difference fails the test, naming where
+the two first part. The recordings are the Python engine's, the oracle the Rust engine was ported against, made before
 the switch removed it (rust-engine ticket 11). `PARITY_RECORD=1 uv run pytest tests/parity` writes recordings instead,
-from the engine world.engine_command names: for a scenario added since, which has no Python recording to hold the
-Rust engine to, so read the diff of what it recorded as a review of the engine's behaviour before committing it.
+from the engine world.engine_command names: for a scenario added since, which has no Python recording to hold the Rust
+engine to, so read the diff of what it recorded as a review of the engine's behaviour before committing it.
 
 With PARITY_COMMANDS set to commands of the engine, comma-separated, such as `run,resume`, a scenario whose recording
 invokes another command is left out; one not recorded yet runs, and fails for want of its recording.
@@ -17,7 +17,8 @@ import pytest
 from scenarios import SCENARIOS
 from world import World
 
-RECORDED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recorded")
+# The recordings, which the e2e scenarios in Rust (engine/e2e) replay too.
+RECORDED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "engine", "e2e", "recorded")
 
 
 def first_difference(want, got, path: str = "$") -> str | None:

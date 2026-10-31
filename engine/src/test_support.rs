@@ -242,9 +242,9 @@ pub fn replaced(p: &Pipeline, change: impl FnOnce(&mut PipelineSettings)) -> Res
     Pipeline::with(p.name(), p.roles().clone(), p.steps().to_vec(), settings)
 }
 
-/// Each recording of the parity harness, tests/parity/recorded/<scenario>.json, by scenario, in name order.
+/// Each recording of the e2e scenarios, engine/e2e/recorded/<scenario>.json, by scenario, in name order.
 pub fn recordings() -> Vec<(String, crate::py::json::Json)> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/parity/recorded");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/e2e/recorded");
     let mut paths: Vec<_> = std::fs::read_dir(dir).expect("the recordings").map(|e| e.expect("an entry").path()).collect();
     paths.sort();
     paths
