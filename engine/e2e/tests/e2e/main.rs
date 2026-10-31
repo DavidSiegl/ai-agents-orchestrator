@@ -107,22 +107,35 @@ fn scratch_recordings(name: &str, writing: bool) -> (Scratch, Recordings) {
     (scratch, recordings)
 }
 
+/// The message a check of an empty scenario named name fails with. The failed check keeps its world for a look;
+/// this removes it, so that a passing test leaves nothing behind.
+fn failure_of_check(recordings: &Recordings, name: &str) -> String {
+    let mut root = None;
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recordings.check(name, |w| root = Some(w.root().to_path_buf()));
+    }))
+    .expect_err("a failed check");
+    let root = root.expect("the scenario ran");
+    std::fs::remove_dir_all(&root).unwrap_or_else(|e| panic!("removing the kept world {}: {e}", root.display()));
+    failed.downcast_ref::<String>().cloned().unwrap_or_default()
+}
+
 /// A scenario with no recording fails, rather than passing for want of anything to compare.
 #[test]
-#[should_panic(expected = "scenario check_unrecorded has no recording")]
 fn a_scenario_without_a_recording_fails() {
     let (_scratch, recordings) = scratch_recordings("unrecorded", false);
-    recordings.check("check_unrecorded", |_| {});
+    let message = failure_of_check(&recordings, "check_unrecorded");
+    assert!(message.starts_with("scenario check_unrecorded has no recording"), "{message}");
 }
 
 /// A scenario whose record differs from its recording fails, naming where.
 #[test]
-#[should_panic(expected = "scenario check_differs differs from its recording at $: key \"invocations\" only in this run")]
 fn a_scenario_that_differs_from_its_recording_fails() {
     let (_scratch, recordings) = scratch_recordings("differs", false);
     let path = recordings.dir.join("check_differs.json");
     std::fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
-    recordings.check("check_differs", |_| {});
+    let message = failure_of_check(&recordings, "check_differs");
+    assert_eq!(message, "scenario check_differs differs from its recording at $: key \"invocations\" only in this run");
 }
 
 /// A recording written holds the scenario: a check that compares with it passes.
