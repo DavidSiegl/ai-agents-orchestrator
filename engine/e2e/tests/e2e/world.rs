@@ -19,6 +19,8 @@ use octoflow_e2e::fakes::AGENT_KINDS;
 use octoflow_e2e::ledger::{write_atomically, Ledger, INVOCATION_VAR};
 use octoflow_e2e::normalize::{facts, Normalizer};
 use octoflow_e2e::scratch::Scratch;
+
+use crate::servers::{ServerFailure, Servers, JENKINS_TOKEN, JENKINS_USER, PYPI_CA};
 use octoflow_e2e::{array_at, object, object_at, procs, str_at, strings};
 use octoflow_engine::py::json::{Json, Map};
 use octoflow_engine::py::text::shlex_quote;
@@ -60,6 +62,8 @@ pub struct Invocation {
     killed: bool,
     /// Its exit status once it ended, a signal's as minus its number, as Python's returncode gives it.
     exit: Option<i32>,
+    /// Whether the world's servers failed it, which wait checks as it polls.
+    servers: ServerFailure,
 }
 
 impl Invocation {
@@ -69,10 +73,11 @@ impl Invocation {
     }
 
     /// Its exit status, once it has ended; kills it and fails the scenario, with its error output, when it runs longer
-    /// than INVOCATION_TIMEOUT.
+    /// than INVOCATION_TIMEOUT, and fails it at once when a server's answer to it panicked (ServerFailure).
     pub fn wait(&mut self) -> i32 {
         let deadline = Instant::now() + INVOCATION_TIMEOUT;
         loop {
+            self.servers.check();
             let ended = self.process.try_wait().unwrap_or_else(|e| panic!("waiting for the engine: {e}"));
             if let Some(ended) = ended {
                 let exit = ended.code().unwrap_or_else(|| -ended.signal().unwrap_or(0));
@@ -173,6 +178,8 @@ fn read_lossy(path: &Path) -> String {
 /// output). Dropping it kills any invocation still running and removes the directory, unless the scenario failed,
 /// when the directory is kept for a look and its path printed.
 pub struct World {
+    /// The world's Jenkins and PyPI. Declared before scratch, so that they stop before the directory they read goes.
+    servers: Servers,
     /// The world's directory, removed when the world is dropped, or kept when the scenario failed. Fields drop after
     /// World's own drop has killed the invocations, so nothing of the engine's still runs in it then.
     scratch: Scratch,
@@ -204,11 +211,12 @@ fn fakes() -> [(&'static str, &'static str); 3] {
 }
 
 impl World {
-    /// A world in a new directory named for the scenario, running engine. Panics, failing the scenario, where gitleaks
-    /// is not on PATH: the engine runs the real one, and a scenario without it would record its absence.
+    /// A world in a new directory named for the scenario, running engine, its Jenkins and PyPI serving. Panics,
+    /// failing the scenario, where gitleaks or openssl is not on PATH: the engine runs the real gitleaks, and a
+    /// scenario without it would record its absence; openssl makes PyPI's certificate (servers::Servers::start).
     pub fn new(scenario: &str, engine: &Path) -> World {
-        if find_on_path("gitleaks").is_none() {
-            panic!("gitleaks is not on PATH; the e2e scenarios need it");
+        for tool in ["gitleaks", "openssl"] {
+            assert!(find_on_path(tool).is_some(), "{tool} is not on PATH; the e2e scenarios need it");
         }
         let scratch = Scratch::kept_on_failure(scenario);
         let root = scratch.path().to_path_buf();
@@ -223,12 +231,17 @@ impl World {
             ("agents", object([])),
             ("machines", Json::Array(Vec::new())),
             ("gh", object([])),
+            ("jenkins", object([("builds", Json::Array(Vec::new()))])),
+            ("pypi", object([])),
         ]);
         for d in ["home", "config/ai-agents-orchestrator", "bin", "fakes", "out", "tmp"] {
             let path = root.join(d);
             fs::create_dir_all(&path).unwrap_or_else(|e| panic!("making {}: {e}", path.display()));
         }
+        let servers = Servers::start(&root);
+        normalizer.literal(&servers.jenkins_url, "<jenkins>");
         let world = World {
+            servers,
             ledger: Ledger::new(&root),
             scratch,
             project,
@@ -271,6 +284,34 @@ impl World {
         self.write_script();
     }
 
+    /// Script the next build the quality job is asked for, build: how it ends ("result"), the quality.md it archives
+    /// ("quality", null for one that ended before its Gate stage), its failing tests ("tests", [name, detail] pairs, or
+    /// null for no test report), its "console" and "description"; with "hold", it runs until release(hold), archiving
+    /// nothing meanwhile.
+    pub fn jenkins_build(&mut self, build: Json) {
+        array_at(object_at(&mut self.script, "jenkins"), "builds").push(build);
+        self.write_script();
+    }
+
+    /// Give the quality job a build that Jenkins keeps from before the scenario, as judged-in-quality reads it.
+    pub fn retained_build(&mut self, number: i64, result: &str, description: &str) {
+        let build = object([("number", Json::Int(number.into())), ("result", Json::from(result)), ("description", Json::from(description))]);
+        array_at(object_at(&mut self.script, "jenkins"), "retained").push(build);
+        self.write_script();
+    }
+
+    /// Make PyPI answer GET /pypi/<name>/json with answer, its JSON API's document; any other name is a 404.
+    pub fn pypi_project(&mut self, name: &str, answer: Json) {
+        object_at(&mut self.script, "pypi").insert(name, answer);
+        self.write_script();
+    }
+
+    /// Make gh's next `pr create` wait until release(hold).
+    pub fn hold_pr_create(&mut self, hold: &str) {
+        object_at(&mut self.script, "gh").insert("create_hold", Json::from(hold));
+        self.write_script();
+    }
+
     /// Change what gh says of pull request n, the n-th the engine opened: state (OPEN, CLOSED or MERGED), closedAt,
     /// mergeable, isDraft.
     pub fn set_pr(&self, n: usize, fields: &[(&str, Json)]) {
@@ -301,10 +342,12 @@ impl World {
         self.wait_for(|| self.ledger.change(|state| octoflow_e2e::holds(state, "reached", hold)), &format!("hold {hold} to be reached"));
     }
 
-    /// Poll condition until it is true; fails the scenario, naming what, after WAIT_TIMEOUT.
+    /// Poll condition until it is true; fails the scenario, naming what, after WAIT_TIMEOUT, and at once when a server's
+    /// answer to the engine panicked (ServerFailure::check).
     pub fn wait_for(&self, mut condition: impl FnMut() -> bool, what: &str) {
         let deadline = Instant::now() + WAIT_TIMEOUT;
         while !condition() {
+            self.servers.failure().check();
             assert!(Instant::now() <= deadline, "waited {WAIT_TIMEOUT:?} for {what}");
             sleep(WAIT_POLL);
         }
@@ -387,7 +430,8 @@ impl World {
         self.normalizer.pid(i64::from(pid), n);
         self.ledger.change(|state| object_at(state, "engines").insert(n.to_string(), Json::Int(pid.into())));
         let args = args.iter().map(|a| (*a).to_string()).collect();
-        self.invocations.push(Invocation { args, process, out_path, output_recorded, killed: false, exit: None });
+        let servers = self.servers.failure();
+        self.invocations.push(Invocation { args, process, out_path, output_recorded, killed: false, exit: None, servers });
         n
     }
 
@@ -449,6 +493,14 @@ impl World {
         };
         env.push(("HERDR_ENV".to_string(), "1".to_string()));
         env.push((INVOCATION_VAR.to_string(), n.to_string()));
+        env.extend([
+            ("JENKINS_URL", self.servers.jenkins_url.clone()),
+            ("JENKINS_USER", JENKINS_USER.to_string()),
+            ("JENKINS_TOKEN", JENKINS_TOKEN.to_string()),
+            ("no_proxy", "127.0.0.1,localhost".to_string()),
+            ("https_proxy", self.servers.proxy_url.clone()),
+            ("SSL_CERT_FILE", self.root().join(PYPI_CA).display().to_string()),
+        ].map(|(k, v)| (k.to_string(), v)));
         if let Ok(profile) = std::env::var("LLVM_PROFILE_FILE") {
             env.push(("LLVM_PROFILE_FILE".to_string(), profile));
         }
@@ -501,7 +553,11 @@ impl World {
     /// commands herdr and gh got, in order, with state.json wherever it changed between them; the run directories'
     /// files; both repositories' refs, commits and working trees; and the scenario's notes. Output read by programs is
     /// kept whole, a human's only as its facts (octoflow_e2e::normalize::facts).
+    ///
+    /// Panics first when a server's answer to the engine panicked (ServerFailure::check), which the record would show only
+    /// as what that made the engine do.
     pub fn record(&mut self) -> Json {
+        self.servers.failure().check();
         let invocations: Vec<Json> = self.invocations.iter().map(invocation_record).collect();
         let events = self.events();
         let raw = object([

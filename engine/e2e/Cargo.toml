@@ -1,7 +1,7 @@
 [package]
 name = "octoflow-e2e"
 version = "0.1.0"
-description = "The engine's end-to-end scenarios: the orchestrator program run against fakes of herdr, gh and ssh"
+description = "The engine's end-to-end scenarios: the orchestrator program run against fakes of herdr, gh, ssh, Jenkins and PyPI"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -13,6 +13,15 @@ octoflow-engine = { path = ".." }
 # The ledger's lock (flock), the world's kill of an invocation (signals) and the host's name, which the normalizer
 # writes as <host>: the engine's own dependency, with the fs feature for flock.
 nix = { version = "0.31", default-features = false, features = ["fs", "hostname", "signal"] }
+
+[dev-dependencies]
+# The world's fake Jenkins (tests/e2e/servers.rs): the engine's own HTTP server, as its http.rs and ci.rs tests use it.
+tiny_http = "0.12"
+# The world's fake PyPI, which the engine reaches over TLS through the world's HTTPS proxy: rustls and its key and
+# certificate types, the versions Cargo.lock had through ureq, with ureq's ring provider. Approved by the user for
+# octoflow-without-python ticket 02, 2026-10-31.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 
 # The programs a world puts on the engine's PATH as herdr, gh and ssh (src/fakes.rs). They are binaries of this
 # package so that its tests find them by CARGO_BIN_EXE_*, which Cargo sets only for a test's own package.

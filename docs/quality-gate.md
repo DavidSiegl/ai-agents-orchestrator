@@ -801,7 +801,7 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
-  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
+  pinned releases of the gitleaks the e2e scenarios (`engine/e2e`) run, of cargo-llvm-cov and cargo-nextest,
   for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
   tests at the base, of cargo-mutants, for the surviving-mutants check's Rust, and of cargo-about, for the Package
   stage's third-party licenses, into the workspace's `.tools/bin`,
@@ -1191,8 +1191,8 @@ q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--
 `HEAD` as a pull request's build into `BRANCH` would: among the builds Jenkins keeps, it ended SUCCESS, and its
 description (above) names `HEAD`'s tree, the merge base of `HEAD` and `origin/BRANCH` as its parent, and a `main`
 commit at which `Jenkinsfile`, `gate.py`, `orchestrator.py`, `pyproject.toml`, `uv.lock` and `.python-version` are
-as in `HEAD` and at that merge base. Such a build ran the parity scenarios (`tests/parity`) only if the change
-touched what they depend on, where a pull request build always runs them; every path that could make the two differ
+as in `HEAD` and at that merge base. Such a build runs the e2e scenarios (`engine/e2e`) only if the change
+touches what they depend on, where a pull request build always runs them; every path that could make the two differ
 makes the quality build run them too (the Jenkinsfile's Test stage lists them). Otherwise, and on any error, such as
 Jenkins unreachable, an HTTP error or a commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails, or
 what stopped it asking. It needs the same `JENKINS_*` credentials as `--quality-gate`. No build calls it yet.

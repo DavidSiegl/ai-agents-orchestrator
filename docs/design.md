@@ -131,7 +131,7 @@ agent gives after writing its handoff file, if any, counts for no turn.
 
 ## Evals
 
-The unit tests and the parity scenarios check what the engine does, never how well the agents do with it: a prompt
+The unit tests and the e2e scenarios check what the engine does, never how well the agents do with it: a prompt
 or workflow change can make runs worse without failing a test. `evals/` is a small set of tasks that real agents do
 end to end, each judged by an acceptance test they never see, so that such a change comes with numbers.
 

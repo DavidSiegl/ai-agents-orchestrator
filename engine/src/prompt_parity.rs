@@ -1,4 +1,4 @@
-//! The prompts the parity scenarios recorded (engine/e2e/recorded/), checked against the templates this engine
+//! The prompts the e2e scenarios recorded (engine/e2e/recorded/), checked against the templates this engine
 //! holds: each prompt an agent got must be made of the run's step templates and the built-in prompts, joined by
 //! blank lines, the step's own template first, with every placeholder whose value the run's state.json gives filled
 //! in with that value. That holds every template's text to the Python engine's byte for byte, and its placeholders

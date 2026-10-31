@@ -152,8 +152,8 @@ pub fn write_atomically(path: &Path, text: &str) {
 /// A run counts only while engine_pids holds its owner's pid, or it has no owner: another engine process that talks
 /// to the world meanwhile, as a taken-over run's old orchestrator does, sees state.json change at times only the
 /// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone. A run with no state
-/// yet is passed over (run_state). Panics, naming the path, where `_changed_states` in tests/parity/fakes.py raises:
-/// when runs/ is there but cannot be listed, at a state run_state refuses, and at an owner that is no object.
+/// yet is passed over (run_state). Panics, naming the path, where the Python harness's `_changed_states` raised: when
+/// runs/ is there but cannot be listed, at a state run_state refuses, and at an owner that is no object.
 fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<i32>) -> Vec<Json> {
     let runs = crate::runs_dir(project);
     let mut names: Vec<String> = match fs::read_dir(&runs) {
@@ -188,9 +188,9 @@ fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<
     changed
 }
 
-/// The text of the run state at path and the object it holds; None where `_changed_states` in
-/// tests/parity/fakes.py catches FileNotFoundError or ValueError: no state.json yet, in a run directory the engine has
-/// not saved in, or text that is not UTF-8 or not JSON. Panics, naming path, where Python raises: any other failure to
+/// The text of the run state at path and the object it holds; None where the Python harness's `_changed_states`
+/// caught FileNotFoundError or ValueError: no state.json yet, in a run directory the engine has
+/// not saved in, or text that is not UTF-8 or not JSON. Panics, naming path, where Python raised: any other failure to
 /// read it (a state.json that is a directory, an entry of runs/ that is a file), and JSON that is no object.
 fn run_state(path: &Path) -> Option<(String, Map<Json>)> {
     let text = match fs::read_to_string(path) {

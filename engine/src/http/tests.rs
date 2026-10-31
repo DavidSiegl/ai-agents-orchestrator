@@ -270,7 +270,7 @@ fn a_resolver_error_has_its_number_when_its_text_gives_it() {
     assert_eq!(resolver_error("something else"), "something else");
 }
 
-// A self-signed certificate for pypi.org, as the parity harness makes one.
+// A self-signed certificate for pypi.org, as the Python harness the e2e scenarios replaced made one.
 const CERT: &str = include_str!("../../tests/data/pypi-cert.pem");
 
 // A second, for a store that holds two.

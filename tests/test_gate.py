@@ -58,7 +58,7 @@ def gate_rust():
     """The path of the gate-rust helper built from ci/gate-rust beside these tests, for the tests that read real Rust:
     built once per run, a debug build, wherever CARGO_TARGET_DIR puts it. Under mutmut that is its copy of the crate's
     sources (pyproject.toml's also_copy). A machine without cargo fails these tests rather than skipping them, as the
-    parity harness fails without its tools (TODO.md, "The Rust engine's parity harness")."""
+    e2e scenarios fail without their tools (TODO.md, "The e2e scenarios: what they do not record")."""
     manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ci", "gate-rust", "Cargo.toml")
     if CARGO is None:
         raise AssertionError("cargo, which builds the gate-rust helper, is not on PATH")
@@ -4892,8 +4892,8 @@ class TestSurvivingMutants(RepositoryTest):
     def test_mutmut_runs_only_the_tests_the_contexts_record_reaching_the_changed_functions(self):
         self.change_the_functions("checked", "unchecked")
         selections = self.selections()
-        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's do; and the
-        # tree has none, so pytest collects it from no selection.
+        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's once did; and
+        # the tree has none, so pytest collects it from no selection.
         data_file = self.contexts({"tests/test_calc.py::test_checked": [1, 2],
                                    "tests/test_calc.py::test_unchecked": [5, 6],
                                    "tests/test_calc.py::test_untouched": [9, 10],

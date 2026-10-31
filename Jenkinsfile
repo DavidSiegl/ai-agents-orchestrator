@@ -182,32 +182,36 @@ pipeline {
                 // The e2e scenarios (engine/e2e) run the orchestrator binary this same command builds, instrumented,
                 // through E2E_ENGINE, so that their runs of it count to its coverage and they build no engine of their
                 // own; they pass it this run's LLVM_PROFILE_FILE.
+                //
+                // A quality build (GIT_REF set) leaves the e2e scenarios out, by a nextest filter, when its change,
+                // against HEAD^, the run's base, touches nothing they depend on: the engine and the e2e package under
+                // engine/, the Cargo workspace it builds in, the example workflows they run, and ci/, which pins the
+                // gitleaks they run; and tests/conftest.py, tests/guard_errors.py and the Python environment, which the
+                // Python harness ran them under: kept from its list (octoflow-without-python ticket 02), at the cost of
+                // a quality build that runs them when only those change. Their Python forerunner took quality build #59
+                // past the orchestrator's QUALITY_TIMEOUT (1299 s of 1200). A git diff that fails counts as a change,
+                // so they run. Pull request builds always run them.
                 sh '''
                     junit=target/nextest/ci/junit.xml
                     rm -f "$junit"
+                    set --
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
+                            rust-toolchain.toml tests/conftest.py tests/guard_errors.py examples pyproject.toml \
+                            uv.lock .python-version ci; then
+                        set -- -E 'not package(octoflow-e2e)'
+                    fi
                     E2E_ENGINE="$WORKSPACE/target/llvm-cov-target/debug/orchestrator" \\
                     ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
                         --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
-                        --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+                        --cobertura --output-path "$WORKSPACE/coverage-rust.xml" "$@"
                     if [ ! -f "$junit" ]; then
                         echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
                         exit 1
                     fi
                 '''
-                // The parity scenarios (tests/parity) replay the Python engine's recordings against the Rust engine's
-                // orchestrator binary, and tests/test_docs.py reads its help: the one the Rust tests above built,
-                // instrumented for coverage, through tests/rust_engine.py's ORCHESTRATOR_BIN and the harness's
-                // PARITY_ENGINE, so that pytest compiles no engine of its own. Run so, it would write its profile
-                // where it runs, into a scenario's project, so LLVM_PROFILE_FILE is /dev/null, which PARITY_ENGINE
-                // passes through env, the harness giving the engine an environment of its own.
-                //
-                // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
-                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
-                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
-                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
-                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
-                // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
-                // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
+                // tests/test_docs.py reads the orchestrator's help: the binary the Rust tests above built,
+                // instrumented for coverage, through ORCHESTRATOR_BIN, so that pytest compiles no engine of its own.
+                // Run so, it would write its profile where it runs, so LLVM_PROFILE_FILE is /dev/null.
                 //
                 // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
                 // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
@@ -220,16 +224,9 @@ pipeline {
                         echo "the Rust tests built no $engine" >&2
                         exit 1
                     fi
-                    parity=''
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
-                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
-                            examples pyproject.toml uv.lock .python-version ci; then
-                        parity='--ignore=tests/parity'
-                    fi
                     status=0
                     LLVM_PROFILE_FILE=/dev/null ORCHESTRATOR_BIN="$engine" \\
-                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" \\
-                    uv run pytest $parity --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
+                    uv run pytest --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
                         --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
@@ -344,6 +341,16 @@ pipeline {
                 always {
                     archiveArtifacts artifacts: 'quality.md', allowEmptyArchive: true
                 }
+            }
+        }
+
+        // A pull request into main must raise the release version over main's: the Release stage releases a merge into
+        // main only when its version has no release yet, so a merge that kept it would go unreleased
+        // (ci/version-raised.sh). After Gate, so that a build that fails it has reported its tests and gate first.
+        stage('Version') {
+            when { changeRequest target: 'main' }
+            steps {
+                sh 'ci/version-raised.sh'
             }
         }
 

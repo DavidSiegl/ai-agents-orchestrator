@@ -7,7 +7,7 @@ Run it from a herdr pane, as `orchestrator run`: every trial is a real run, with
 `--`, are given to the engine's `run` unchanged, such as `--workflow quick --model sonnet`; the runner sets
 `--no-pr`, `--spec` and `--cwd` itself, and refuses those, `--machine` and `--worktree` there.
 
-The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's own,
+The engine is the command line `EVAL_ENGINE` gives, else this checkout's own,
 built first (`cargo build --locked -p octoflow-engine`), so that a trial never runs a binary older than the commit it
 is recorded under. It is run as a program, through `run` and
 `close`, and must keep a run's files as the orchestrator does: the runner finds the run under

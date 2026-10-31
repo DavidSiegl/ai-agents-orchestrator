@@ -440,14 +440,14 @@ place, with exactly the placeholders of the text it replaces.
 ## Running tests
 
 ```bash
-cargo test --workspace    # the engine's and the desktop shell's
-uv run pytest             # gate.py's, the docs', and the parity scenarios against the engine's binary
+cargo test --workspace    # the engine's, its e2e scenarios' and the desktop shell's
+uv run pytest             # gate.py's and the docs'
 uv run pytest --cov=gate --cov-branch --cov-report=xml && \
     uv run python gate.py --base main --coverage coverage.xml
 ```
 
-The parity scenarios (`tests/parity`) replay what the Python engine did, recorded before it was removed, against
-the Rust engine, which `uv run pytest` builds with cargo. `tests/test_properties.py` holds property-based tests of
+The e2e scenarios (`engine/e2e`) run the engine as a program against fakes of herdr, gh, ssh, Jenkins and PyPI, and
+compare what it did with their recordings, which the Python engine made before it was removed. `tests/test_properties.py` holds property-based tests of
 the gate: 25 inputs per test by default, 250 with `HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. A change to a
 workflow step's prompt or to the quality file's wording fails a test against its golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest` rewrites them, and the
 change is reviewed as their diff (see [Tests](docs/architecture.md#tests)). `packaging/build-binary.sh` builds and

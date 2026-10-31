@@ -1,6 +1,6 @@
 //! The orchestrator program as the human runs it (src/main.rs): its exit statuses and last lines, with herdr played
-//! by a script on its PATH. What it does in between, run and resume to their verdicts, is the parity scenarios'
-//! (tests/parity) and crate::cli's tests'.
+//! by a script on its PATH. What it does in between, run and resume to their verdicts, is the e2e scenarios'
+//! (engine/e2e) and crate::cli's tests'.
 //!
 //! Linux only, as the engine's other process tests: GNU env starts the program with SIGINT, SIGTERM and SIGHUP at
 //! their default, whatever the test's own process does with them (Jenkins runs the tests with SIGINT ignored).
