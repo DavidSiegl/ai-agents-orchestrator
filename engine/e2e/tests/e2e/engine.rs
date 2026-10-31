@@ -23,9 +23,10 @@ pub fn binary() -> PathBuf {
 fn build() -> PathBuf {
     // CARGO is the cargo that runs this test, when one does.
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    // A target directory of its own: the engine built alone resolves its dependencies' features without this
-    // package's (nix's fs), and the workspace's test build with them, so in the one target directory each build would
-    // relink <target>/<profile>/orchestrator, which the engine's own program tests run meanwhile.
+    // A target directory of its own: the engine built alone resolves its dependencies' features without the other
+    // members' (nix's fs from this package; serde's derive and serde_json's raw_value from the desktop shell), and the
+    // workspace's test build with them, so in the one target directory each build would relink
+    // <target>/<profile>/orchestrator, which the engine's own program tests run meanwhile.
     let exe = std::env::current_exe().unwrap_or_else(|e| panic!("finding this test's program: {e}"));
     // The test runs from <target>/<profile>/deps/.
     let target = exe.ancestors().nth(2).expect("a target directory above this test's program").join("e2e-engine");
