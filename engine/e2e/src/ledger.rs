@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -60,7 +60,7 @@ impl Ledger {
                 Ok(Json::Object(state)) => state,
                 other => panic!("{} is not a JSON object: {other:?}", path.display()),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+            Err(e) if e.kind() == ErrorKind::NotFound => Map::new(),
             Err(e) => panic!("reading {}: {e}", path.display()),
         };
         let result = f(&mut state);
@@ -99,7 +99,7 @@ impl Ledger {
         let path = self.path("events.jsonl");
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Vec::new(),
             Err(e) => panic!("reading {}: {e}", path.display()),
         };
         text.lines().map(|line| Json::parse(line).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).collect()
@@ -151,21 +151,24 @@ pub fn write_atomically(path: &Path, text: &str) {
 ///
 /// A run counts only while engine_pids holds its owner's pid, or it has no owner: another engine process that talks
 /// to the world meanwhile, as a taken-over run's old orchestrator does, sees state.json change at times only the
-/// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone.
+/// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone. Panics, naming the path,
+/// when runs/ or a state.json is there but cannot be read, as `_changed_states` in tests/parity/fakes.py raises.
 fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<i32>) -> Vec<Json> {
     let runs = project.join(".orchestrator").join("runs");
     let mut names: Vec<String> = match fs::read_dir(&runs) {
-        Ok(entries) => entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect(),
-        Err(_) => return Vec::new(),
+        Ok(entries) => entries
+            .map(|e| e.unwrap_or_else(|e| panic!("listing {}: {e}", runs.display())))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(e) => panic!("listing {}: {e}", runs.display()),
     };
     names.sort();
     let last = object_at(state, "last_states");
     let mut changed = Vec::new();
     for name in names {
         let path = runs.join(&name).join("state.json");
-        // A run directory without its state yet, or one the engine is writing, is looked at by the next command.
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let Ok(Json::Object(mut saved)) = Json::parse(&text) else { continue };
+        let Some((text, mut saved)) = run_state(&path) else { continue };
         if let Some(owner) = saved.get("owner").filter(|o| o.truthy()) {
             let pid = owner.get("pid").and_then(Json::as_int);
             if !pid.is_some_and(|pid| engine_pids.iter().any(|&p| i128::from(p) == pid)) {
@@ -181,6 +184,26 @@ fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<
         }
     }
     changed
+}
+
+/// The text of the run state at path and the object it holds; None when there is no run state there yet: no file
+/// (an entry of runs/ that is no directory, or a run directory the engine has not saved in, which the engine's
+/// Host::run_states skips too), or text that is no JSON object (a state being written). Panics, naming path, when a
+/// file is there but cannot be read.
+fn run_state(path: &Path) -> Option<(String, Map<Json>)> {
+    if !path.is_file() {
+        return None;
+    }
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        // Removed since is_file looked.
+        Err(e) if e.kind() == ErrorKind::NotFound => return None,
+        Err(e) => panic!("reading {}: {e}", path.display()),
+    };
+    match Json::parse(&text) {
+        Ok(Json::Object(saved)) => Some((text, saved)),
+        _ => None,
+    }
 }
 
 /// json with every object's keys sorted, as json.dumps's sort_keys writes it.
@@ -200,5 +223,123 @@ fn sorted(json: &Json) -> Json {
 pub fn wait_until(ledger: &Ledger, mut f: impl FnMut(&mut Map<Json>) -> bool) {
     while !ledger.change(&mut f) {
         sleep(POLL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project in a directory of its own, removed when dropped: runs holds each run's directory name and the text of
+    /// its state.json, or None for a run directory without one.
+    struct Project(PathBuf);
+
+    impl Project {
+        fn new(name: &str, runs: &[(&str, Option<&str>)]) -> Project {
+            let dir = std::env::temp_dir().join(format!("octoflow-e2e-ledger-{name}-{}", std::process::id()));
+            match fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != ErrorKind::NotFound => panic!("removing {}: {e}", dir.display()),
+                _ => {}
+            }
+            fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
+            let project = Project(dir);
+            for (run, text) in runs {
+                let run_dir = project.runs().join(run);
+                fs::create_dir_all(&run_dir).unwrap_or_else(|e| panic!("making {}: {e}", run_dir.display()));
+                if let Some(text) = text {
+                    project.write(run, text);
+                }
+            }
+            project
+        }
+
+        fn runs(&self) -> PathBuf {
+            self.0.join(".orchestrator").join("runs")
+        }
+
+        fn state_path(&self, run: &str) -> String {
+            self.runs().join(run).join("state.json").to_string_lossy().into_owned()
+        }
+
+        fn write(&self, run: &str, text: &str) {
+            let path = self.state_path(run);
+            fs::write(&path, text).unwrap_or_else(|e| panic!("writing {path}: {e}"));
+        }
+
+        /// The paths changed_states finds changed, in its order, for an engine of pids.
+        fn changed(&self, state: &mut Map<Json>, pids: &[i32]) -> Vec<String> {
+            let pids: BTreeSet<i32> = pids.iter().copied().collect();
+            let changed = changed_states(state, &self.0, &pids);
+            changed.iter().map(|c| crate::str_at(c, "path").to_string()).collect()
+        }
+    }
+
+    impl Drop for Project {
+        fn drop(&mut self) {
+            if let Err(e) = fs::remove_dir_all(&self.0) {
+                eprintln!("removing {}: {e}", self.0.display());
+            }
+        }
+    }
+
+    #[test]
+    fn a_project_without_runs_has_none_to_log() {
+        let project = Project::new("no-runs", &[]);
+        let mut state = Map::new();
+        assert!(project.changed(&mut state, &[]).is_empty());
+        assert!(state.get("last_states").is_none());
+    }
+
+    #[test]
+    fn a_state_is_logged_once_until_it_changes_but_for_its_heartbeat() {
+        let project = Project::new("logged", &[("a", Some(r#"{"phase": "spec", "heartbeat_at": "1"}"#))]);
+        let a = project.state_path("a");
+        let mut state = Map::new();
+        assert_eq!(project.changed(&mut state, &[]), std::slice::from_ref(&a));
+        let logged = object([(a.as_str(), Json::from(r#"{"phase": "spec"}"#))]);
+        assert_eq!(state.get("last_states").map(Json::dumps), Some(logged.dumps()));
+        assert!(project.changed(&mut state, &[]).is_empty());
+        project.write("a", r#"{"phase": "spec", "heartbeat_at": "2"}"#);
+        assert!(project.changed(&mut state, &[]).is_empty());
+        project.write("a", r#"{"phase": "build", "heartbeat_at": "2"}"#);
+        assert_eq!(project.changed(&mut state, &[]), [a]);
+    }
+
+    #[test]
+    fn what_is_no_run_state_yet_is_neither_logged_nor_remembered() {
+        let project = Project::new("unsaved", &[("a", None), ("b", Some(r#"{"phase": "sp"#)), ("c", Some("[1]"))]);
+        let stray = project.runs().join(".DS_Store");
+        fs::write(&stray, "").unwrap_or_else(|e| panic!("writing {}: {e}", stray.display()));
+        let dir_state = project.runs().join("d").join("state.json");
+        fs::create_dir_all(&dir_state).unwrap_or_else(|e| panic!("making {}: {e}", dir_state.display()));
+        let mut state = Map::new();
+        assert!(project.changed(&mut state, &[]).is_empty());
+        assert_eq!(state.get("last_states").map(Json::dumps).as_deref(), Some("{}"));
+        // Once written whole, b's state is logged as a first one.
+        project.write("b", r#"{"phase": "spec"}"#);
+        assert_eq!(project.changed(&mut state, &[]), [project.state_path("b")]);
+    }
+
+    #[test]
+    fn a_state_is_logged_only_while_its_owner_is_of_the_engine_or_it_has_none() {
+        let runs = [
+            ("a", Some(r#"{"owner": {"pid": 7}}"#)),
+            ("b", Some(r#"{"owner": {"pid": 8}}"#)),
+            ("c", Some(r#"{"owner": {}}"#)),
+            ("d", Some(r#"{"owner": null}"#)),
+            ("e", Some(r#"{"owner": {"host": "h"}}"#)),
+        ];
+        let project = Project::new("owners", &runs);
+        assert_eq!(project.changed(&mut Map::new(), &[7]), ["a", "c", "d"].map(|run| project.state_path(run)));
+    }
+
+    #[test]
+    fn a_state_that_cannot_be_read_fails() {
+        let project = Project::new("unreadable", &[("a", Some("{}"))]);
+        let a = project.state_path("a");
+        fs::write(&a, [0xff]).unwrap_or_else(|e| panic!("writing {a}: {e}"));
+        let failure = std::panic::catch_unwind(|| project.changed(&mut Map::new(), &[])).expect_err("a panic");
+        let message = failure.downcast_ref::<String>().map_or("", String::as_str);
+        assert!(message.starts_with(&format!("reading {a}: ")), "{message}");
     }
 }
