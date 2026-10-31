@@ -12,6 +12,10 @@ pub mod fakes;
 pub mod ledger;
 pub mod normalize;
 pub mod procs;
+pub mod scratch;
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use octoflow_engine::py::json::{Json, Map};
 
@@ -61,4 +65,25 @@ pub fn at<'a>(json: &'a Json, key: &str) -> &'a Json {
 /// The string at key of the object json; panics naming key when it has none.
 pub fn str_at<'a>(json: &'a Json, key: &str) -> &'a str {
     at(json, key).as_str().unwrap_or_else(|| panic!("{key} is not a string in {}", json.dumps()))
+}
+
+/// Where the engine keeps the runs of the project at project, a directory per run named `<run id>-<key>`.
+pub fn runs_dir(project: &Path) -> PathBuf {
+    project.join(".orchestrator").join("runs")
+}
+
+/// The directory of the project's run whose key is key. Panics, naming the directory, when runs/ cannot be listed or
+/// holds no run of that key, or more than one.
+pub fn run_dir(project: &Path, key: &str) -> PathBuf {
+    let runs = runs_dir(project);
+    let entries = fs::read_dir(&runs).unwrap_or_else(|e| panic!("listing {}: {e}", runs.display()));
+    let found: Vec<String> = entries
+        .map(|e| e.unwrap_or_else(|e| panic!("listing {}: {e}", runs.display())))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(&format!("-{key}")))
+        .collect();
+    match found.as_slice() {
+        [one] => runs.join(one),
+        _ => panic!("no single run directory for key {key} in {}: {found:?}", runs.display()),
+    }
 }
