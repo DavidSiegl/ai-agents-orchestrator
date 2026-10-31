@@ -498,10 +498,11 @@ mod tests {
         Json::parse(include_str!("normalize/oracle.json")).expect("oracle.json is JSON")
     }
 
-    /// The normalizer normalize_oracle.py makes: two literals, one inside the other; three pids, the first registered
-    /// twice; and the oracle's record learnt.
+    /// The normalizer normalize_oracle.py makes: without the host's name, which could occur in an input on some host;
+    /// two literals, one inside the other; three pids, the first registered twice; and the oracle's record learnt.
     fn oracle_normalizer(oracle: &Json) -> Normalizer {
         let mut n = Normalizer::new();
+        n.literals.clear();
         n.literal("/w/orld", "<world>");
         n.literal("/w", "<short>");
         n.pid(4242, 1);

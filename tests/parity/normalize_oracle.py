@@ -3,8 +3,9 @@ normalizer is held to (engine/e2e/src/normalize.rs, its oracle tests). Make it a
 
     python3 tests/parity/normalize_oracle.py > engine/e2e/src/normalize/oracle.json
 
-The normalizer it uses: two literals, one inside the other; three pids, the first registered twice; RECORD learnt. The
-Rust tests make the same one, so a change to either side's setup is a change to both."""
+The normalizer it uses: without the host's name, so that the oracle holds on any host; two literals, one inside the
+other; three pids, the first registered twice; RECORD learnt. The Rust tests make the same one, so a change to either
+side's setup is a change to both."""
 
 import json
 import sys
@@ -42,6 +43,7 @@ FACTS = [
 ]
 
 n = Normalizer()
+n._literals.clear()
 n.literal("/w/orld", "<world>")
 n.literal("/w", "<short>")
 n.pid(4242, 1)
