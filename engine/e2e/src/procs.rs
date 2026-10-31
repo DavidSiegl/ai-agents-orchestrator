@@ -4,16 +4,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-/// The fields of /proc/<pid>/stat after the command name, from the state on; None when pid has ended, its stat file
-/// gone. Errors: a stat that cannot be read for another reason.
+/// The fields of /proc/<pid>/stat after the command name, from the state on; None when pid has ended and been
+/// reaped, its stat gone, whether before it was opened or while it was read (gone). Errors: a stat that cannot be read
+/// for another reason.
 fn stat_fields(pid: i32) -> std::io::Result<Option<Vec<String>>> {
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if gone(&e) => return Ok(None),
         Err(e) => return Err(e),
     };
     // The command name, field 2, is in parentheses and may hold spaces and parentheses itself.
     Ok(stat.rsplit_once(')').map(|(_, rest)| rest.split_whitespace().map(str::to_string).collect()))
+}
+
+/// Whether e, from reading a process's stat, says the process is gone: no stat to open, or ESRCH, a process reaped
+/// between the stat's open and its read (proc_single_show in the kernel's fs/proc/base.c).
+fn gone(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32)
 }
 
 /// The parent of process pid, from /proc/<pid>/stat; None when pid has ended or its stat cannot be read.
@@ -22,7 +29,7 @@ pub fn parent(pid: i32) -> Option<i32> {
 }
 
 /// Whether process pid has ended: gone from /proc, or a zombie its parent has not reaped yet. Errors: a stat that
-/// cannot be read but for its being gone, such as one /proc's hidepid hides.
+/// cannot be read but for its being gone (stat_fields), such as one /proc's hidepid hides.
 pub fn ended(pid: i32) -> std::io::Result<bool> {
     Ok(stat_fields(pid)?.is_none_or(|fields| fields.first().map(String::as_str) == Some("Z")))
 }
@@ -72,6 +79,13 @@ mod tests {
         child.wait().expect("waiting for true");
         assert!(ended(pid).expect("reading a reaped process's stat"));
         assert_eq!(parent(me), i32::try_from(std::os::unix::process::parent_id()).ok());
+    }
+
+    #[test]
+    fn a_process_reaped_while_its_stat_is_read_is_gone() {
+        assert!(gone(&std::io::Error::from_raw_os_error(nix::errno::Errno::ESRCH as i32)));
+        assert!(gone(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert!(!gone(&std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32)));
     }
 
     #[test]
