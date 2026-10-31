@@ -271,6 +271,12 @@ impl World {
         self.write_script();
     }
 
+    /// Make gh's next `pr create` wait until release(hold).
+    pub fn hold_pr_create(&mut self, hold: &str) {
+        object_at(&mut self.script, "gh").insert("create_hold", Json::from(hold));
+        self.write_script();
+    }
+
     /// Change what gh says of pull request n, the n-th the engine opened: state (OPEN, CLOSED or MERGED), closedAt,
     /// mergeable, isDraft.
     pub fn set_pr(&self, n: usize, fields: &[(&str, Json)]) {

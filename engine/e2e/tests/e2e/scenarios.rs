@@ -262,6 +262,82 @@ pub fn publish_with_conflict(w: &mut World) {
 
 // -- Stopped and resumed ------------------------------------------------------------
 
+/// Run the engine with args until it reaches hold, kill it there, then let hold go and resume the run with --force,
+/// which a run whose orchestrator died a moment ago needs: its heartbeat is still fresh.
+fn killed_and_resumed(w: &mut World, hold: &str, args: &[&str]) {
+    let run = w.start(args, true);
+    w.wait_reached(hold);
+    w.invocation(run).kill();
+    w.release(hold);
+    let key = w.run_key(1);
+    w.run(&["resume", "--force", &key]);
+}
+
+/// Killed while the Spec Collector interviews; resumed, the interview's file is found written.
+pub fn kill_in_spec(w: &mut World) {
+    w.agent("spec", [spec_written().hold("spec")]);
+    w.agent("build", [built(1, 0)]);
+    w.agent("review", [approved(1)]);
+    killed_and_resumed(w, "spec", &["run", "--", TASK]);
+}
+
+/// Killed while the Builder works.
+pub fn kill_in_build(w: &mut World) {
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0).hold("build")]);
+    w.agent("review", [approved(1)]);
+    killed_and_resumed(w, "build", &["run", "--", TASK]);
+}
+
+/// Killed while the Reviewer works, in round 2.
+pub fn kill_in_review(w: &mut World) {
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0), built(2, 0)]);
+    w.agent("review", [reviewed(1, "CHANGES_REQUESTED", "1. src/calc.py:5: no docstring."), approved(2).hold("review")]);
+    killed_and_resumed(w, "review", &["run", "--", TASK]);
+}
+
+/// Killed while gh opens the pull request, after the commit and the push; resumed, publishing finishes.
+pub fn kill_in_publish(w: &mut World) {
+    w.hold_pr_create("publish");
+    approved_roles(w);
+    killed_and_resumed(w, "publish", &["run", "--", TASK]);
+}
+
+/// examples/workflows/product-team.toml killed in step hold, design or tests, and resumed.
+fn product_team_killed(w: &mut World, hold: &str) {
+    let held = |action: Action, step: &str| if hold == step { action.hold(step) } else { action };
+    w.agent("spec", [spec_written()]);
+    w.agent("design", [held(writes("design.md", "# Design\n\nAdd subtract beside add in src/calc.py.\n"), "design")]);
+    let tests = writes("tests.md", "Acceptance test: tests/test_calc.py::test_subtract.\n")
+        .edit(&[("tests/test_calc.py", TEST_WITH_SUBTRACT)]);
+    w.agent("tests", [held(tests, "tests")]);
+    w.agent("build", [built(1, 0).edit(&[("src/calc.py", CALC_WITH_SUBTRACT)])]);
+    w.agent("review", [approved(1)]);
+    killed_and_resumed(w, hold, &["run", "--workflow-file", &example("product-team.toml"), "--", TASK]);
+}
+
+/// The product team's run killed while the Architect works, before the run has a branch.
+pub fn kill_in_design(w: &mut World) {
+    product_team_killed(w, "design");
+}
+
+/// The product team's run killed while the QA Engineer writes the locked tests, its first editing step.
+pub fn kill_in_tests(w: &mut World) {
+    product_team_killed(w, "tests");
+}
+
+/// The Builder exits without its report and the run fails; resume restarts it in its saved session, which it is
+/// prompted to continue in.
+pub fn resume_after_agent_exit(w: &mut World) {
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [exits(), built(1, 0).into()]);
+    w.agent("review", [approved(1)]);
+    w.run(&["run", "--", TASK]);
+    let key = w.run_key(1);
+    w.run(&["resume", &key]);
+}
+
 /// resume --force while the run's orchestrator is alive: the new one takes the run over, and the old one stops at its
 /// next save without saving.
 pub fn takeover(w: &mut World) {
