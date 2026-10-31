@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "octoflow-engine"
-version = "0.51.1"
+version = "0.51.2"
 dependencies = [
  "clap",
  "jiff",
@@ -4548,6 +4548,15 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "nix",
+ "serde_json",
 ]
 
 [[package]]

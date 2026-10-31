@@ -171,7 +171,8 @@ pipeline {
                 // pytest itself could not run.
                 //
                 // The Rust tests of every member of the top-level Cargo workspace (Cargo.toml), the engine's, its e2e
-                // scenarios' and the desktop shell's, with line coverage, for the Gate stage likewise: --ignore-run-fail
+                // scenarios', the desktop shell's and xtask's (which build the eval tasks' toy crates, and the engine
+                // into target/xtask-engine), with line coverage, for the Gate stage likewise: --ignore-run-fail
                 // writes the coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build
                 // that did not compile or a tool that could not run. ci/nextest.toml has the ci profile write the JUnit
                 // report the Gate stage reads. Once the tests are built, --ignore-run-fail turns any failure of

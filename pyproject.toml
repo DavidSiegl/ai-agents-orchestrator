@@ -1,13 +1,12 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
-# Only tests/: evals/tasks/*/hidden_test.py match pytest's *_test.py, and are run by evals/run.py, not by pytest.
 testpaths = ["tests"]
 # Leaves out the contract tests, as their marker says (tests/conftest.py).
 addopts = ["-m", "not contract"]
 
 [project]
 name = "octoflow"
-version = "0.51.1"
+version = "0.51.2"
 description = "Octoflow AI: coding agents in relay, spec to build to review, each role judged by another, in herdr"
 readme = "README.md"
 # gate.py, the quality gate, is all that is Python now that the engine is Rust's (engine/): stdlib-only, so it runs
@@ -55,18 +54,18 @@ max-complexity = 15
 "tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901", "D1"]
 
 [tool.mypy]
-# The tests are untyped by design; the gate and the eval runner are the typed surface.
-files = ["gate.py", "evals/run.py", "evals/make_bundles.py", "evals/acceptance.py"]
+# The tests are untyped by design; the gate is the typed surface.
+files = ["gate.py"]
 
 [tool.mutmut]
 # What `gate.py`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions a change
 # edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs them in
-# a directory of its own, which holds only what is listed here; tests/test_evals.py imports evals/, and
-# tests/test_gate.py builds the gate-rust helper from ci/gate-rust/'s sources, without its target/: mutmut copies a file
-# into a directory that must be there, which copying src/ first makes.
+# a directory of its own, which holds only what is listed here; tests/test_gate.py builds the gate-rust helper from
+# ci/gate-rust/'s sources, without its target/: mutmut copies a file into a directory that must be there, which copying
+# src/ first makes.
 source_paths = ["gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
-also_copy = ["examples/", "docs/", "evals/", "ci/gate-rust/src/", "ci/gate-rust/Cargo.toml", "ci/gate-rust/Cargo.lock"]
+also_copy = ["examples/", "docs/", "ci/gate-rust/src/", "ci/gate-rust/Cargo.toml", "ci/gate-rust/Cargo.lock"]
 # argparse's help and description texts: prose, not behaviour, which no test reads word for word. mutmut matches each
 # pattern against each source line and skips every expression that starts on a matching line, with what it holds, the
 # following lines of a text too. The patterns match any keyword argument of those names, not only argparse's. Flag

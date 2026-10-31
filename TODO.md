@@ -57,13 +57,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   follow-up prompts, notes, commit messages and pull request bodies, which the recordings hold as sent where a scenario
   reaches them.
 
-- **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
-  a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
-  Python engine was frozen then; it runs `EVAL_ENGINE`, else the checkout's `target/debug/orchestrator`. Whether the
-  engine gets an `eval` command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
-  origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
-  which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
-  still lacks is under Open issues.
+- **The eval set: what it does not cover.** `cargo xtask eval` (live-checks/04, octoflow-without-python/08,
+  docs/design.md, Evals) runs the engine as a program, `run --no-pr --spec`, rather than being the `orchestrator.py
+  eval` command the ticket named, since the Python engine was frozen then; it runs `EVAL_ENGINE`, else the checkout's
+  own build. Whether the engine gets an `eval` command of its own is open. Not covered: the quality gate, since the
+  toy repositories have no quality job and their origin is a bundle no snapshot can be pushed to, so `quality rounds`
+  stays 0; a `--worktree` or `--machine` run, which the runner refuses; and an interview, which `--spec` skips.
+  Decided 2026-10-28. The verification run it still lacks is under Open issues.
 
 ## Open issues
 
@@ -154,18 +154,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   with a per-function "exempt" mark on `_ScoredFunction` that `_BasePool` reads where it now asks
   `_complexity_exempt` of a path.
 
-- **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
-  brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
-  in column 0 (`evals/tasks/docs/hidden_test.py:64`, F1) and its `usage()` closes a fence on any fence line, not the
-  matching one (`:35`, F2); `evals/run.py`'s `_run_metrics` trusts the shape of a metrics.json it could parse (F3);
-  `evals/make_bundles.py`'s git inherits `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_WORK_TREE` (F4); `evals/acceptance.py`'s
-  summary takes every unittest error for a test case (F5); and `evals/run.py:167` drops a failed removal of the clone
-  (F6). Closes with each fixed in a pull request of the eval set's.
 - **The Gate stage's comment on report order describes a window that has closed.** The Jenkinsfile passes the Rust
   reports before the Python's for a main whose `gate.py` took `--tests` and `--coverage` once; main's takes them
   repeatedly since #163, so the order and its comment can go. Raised by cross-review 88 (F9, 2026-10-28).
 
-- **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
+- **No agent has run an eval task yet.** live-checks/04's verification asks for one real `cargo xtask eval --tasks <one>
   --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
   request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
   "Finding 1 is the kind of defect only a real run's output (or a test built from one) shows": a task text or a
@@ -853,6 +846,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   after each save (Open issues, "No test crashes the Rust engine after each save").
 
 ## Fixed
+
+- **The eval set's code had review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167 brought.
+  Fixed (2026-10-31, octoflow-without-python ticket 08) by the port of the eval set to Rust, `cargo xtask eval` and
+  `cargo xtask bundles` with Rust toy repositories: the docs task's hidden test reads a fence indented by up to three
+  spaces, and closes it only on a run of its own character at least as long (`usage` in
+  `evals/tasks/docs/hidden_test.rs`, F1, F2); a metrics.json value of the wrong type counts as missing (`run_metrics` in
+  `xtask/src/eval.rs`, F3); the bundles' git runs without `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_WORK_TREE` and
+  `GIT_OBJECT_DIRECTORY` (`GIT_REPOSITORY_ENV` in `xtask/src/process.rs`, for every command the chores start, F4); the
+  runner names what did not pass from `cargo test`'s `test NAME ... FAILED` lines, and says so when none failed
+  (`test_output`, F5); and a clone that cannot be removed is reported (`run_trial`, F6).
 
 - **The gate judges Rust as it judges Python.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). Fixed (2026-10-30,
   every ticket of it). The helper the checks read Rust through: `ci/gate-rust/`, a crate on syn whose JSON
