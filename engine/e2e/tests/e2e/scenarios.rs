@@ -7,6 +7,7 @@
 use octoflow_e2e::object;
 use octoflow_engine::py::json::{Json, Map};
 
+use crate::servers::JOB;
 use crate::world::{checkout, World};
 
 // -- What the agents write ------------------------------------------------------
@@ -227,6 +228,169 @@ pub fn proofs_run(w: &mut World) {
     w.run(&["run", "--workflow-file", &path, "--", TASK]);
 }
 
+// -- The quality gate ----------------------------------------------------------------
+
+const GATED: [&str; 3] = ["run", "--quality-gate", JOB];
+const QUALITY_FAILED: &str = "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n\
+                              ## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n";
+const PYPROJECT_WITH_ATTRS: &str =
+    "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = [\"attrs>=25\"]\n";
+
+/// A quality build the scenario scripts (World::jenkins_build), built up from `build`.
+struct Build(Map<Json>);
+
+impl Build {
+    /// Its failing tests, (dotted name, detail), in its test report.
+    fn tests(mut self, tests: &[(&str, &str)]) -> Build {
+        let pairs = tests.iter().map(|(name, detail)| Json::Array(vec![Json::from(*name), Json::from(*detail)]));
+        self.0.insert("tests", Json::Array(pairs.collect()));
+        self
+    }
+
+    fn console(mut self, console: &str) -> Build {
+        self.0.insert("console", Json::from(console));
+        self
+    }
+
+    /// Keep it running until the world releases hold.
+    fn hold(mut self, hold: &str) -> Build {
+        self.0.insert("hold", Json::from(hold));
+        self
+    }
+}
+
+impl From<Build> for Json {
+    fn from(build: Build) -> Json {
+        Json::Object(build.0)
+    }
+}
+
+/// A build that ends with result, archiving quality, or nothing for None: one that ended before its Gate stage.
+fn build(result: &str, quality: Option<&str>) -> Build {
+    Build(Map::from_iter([
+        ("result", Json::from(result)),
+        ("quality", quality.map_or(Json::Null, Json::from)),
+        ("tests", Json::Null),
+        ("console", Json::from("")),
+        ("hold", Json::Null),
+        ("description", Json::Null),
+    ]))
+}
+
+/// GATED, then args.
+fn gated<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    GATED.iter().copied().chain(args.iter().copied()).collect()
+}
+
+/// --quality-gate: the first quality round passes; the Builder added a dependency the spec names, which the
+/// orchestrator's checks look up on PyPI.
+pub fn quality_passes(w: &mut World) {
+    w.jenkins_build(build("SUCCESS", Some("GATE: OK\n\nEvery condition holds.\n")).into());
+    let attrs = Json::parse(
+        r#"{"info": {"version": "25.3.0", "license_expression": "MIT"},
+            "releases": {"15.0.0": [{"upload_time_iso_8601": "2015-01-29T00:00:00Z"}],
+                         "25.3.0": [{"upload_time_iso_8601": "2025-03-13T00:00:00Z"}]},
+            "urls": [{"upload_time_iso_8601": "2025-03-13T00:00:00Z"}]}"#,
+    )
+    .expect("attrs's PyPI document");
+    w.pypi_project("attrs", attrs);
+    w.agent("spec", [writes("spec.md", &format!("{SPEC}\nUse attrs for the result type.\n"))]);
+    w.agent("build", [built(1, 0).edit(&[("src/calc.py", CALC_WITH_SUBTRACT), ("pyproject.toml", PYPROJECT_WITH_ATTRS)])]);
+    w.agent("review", [approved(1)]);
+    w.run(&gated(&["--", TASK]));
+}
+
+/// Quality round 1 fails, the Builder answers it, and quality round 2 passes.
+pub fn quality_fails_then_passes(w: &mut World) {
+    w.jenkins_build(build("UNSTABLE", Some(QUALITY_FAILED)).into());
+    w.jenkins_build(build("SUCCESS", Some("GATE: OK\n")).into());
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0), built(1, 1)]);
+    w.agent("review", [approved(1)]);
+    w.run(&gated(&["--", TASK]));
+}
+
+/// Quality rounds 1 and 2 fail on the same finding: the loop stops and the Reviewer is told it is stuck.
+pub fn quality_stuck(w: &mut World) {
+    w.jenkins_build(build("UNSTABLE", Some(QUALITY_FAILED)).into());
+    w.jenkins_build(build("UNSTABLE", Some(QUALITY_FAILED)).into());
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0), built(1, 1)]);
+    w.agent("review", [reviewed(1, "CHANGES_REQUESTED", "1. src/calc.py:7: the gate still fails."), built(2, 0)]);
+    w.run(&gated(&["--max-rounds", "1", "--", TASK]));
+}
+
+/// The build ends FAILURE before its Gate stage, once with a test report and once without, until
+/// --max-quality-rounds; the Reviewer gets the change anyway.
+pub fn quality_build_failed(w: &mut World) {
+    w.jenkins_build(build("FAILURE", None).tests(&[("tests.test_calc.test_subtract", "AssertionError: 1 != -1")]).into());
+    w.jenkins_build(
+        build("FAILURE", None).console("Started\n+ uv sync --frozen\nerror: lock file out of date\nFinished").into(),
+    );
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0), built(1, 1)]);
+    w.agent("review", [approved(1)]);
+    w.run(&gated(&["--max-quality-rounds", "2", "--", TASK]));
+}
+
+/// A workflow without a verdict step whose last quality round fails: QUALITY_GATE_FAILED, exit status 3.
+pub fn quality_workflow_without_review(w: &mut World) {
+    let path = w.write(
+        "workflows/solo.toml",
+        "description = \"Builder alone\"\n\n[roles]\nbuild = \"Builder\"\n\n[[steps]]\nuse = \"build\"\n\
+         prompt = \"Implement {task} in {cwd}; report to {build_path}.\"\n\
+         again = \"Do it again; report to {build_path}.\"\nfresh_note = \"You are a fresh session.\"\n",
+    );
+    w.jenkins_build(build("UNSTABLE", Some(QUALITY_FAILED)).into());
+    w.agent("build", [built(1, 0)]);
+    w.run(&gated(&["--max-quality-rounds", "1", "--workflow-file", &path, "--", TASK]));
+}
+
+/// judged-in-quality on a branch whose tree a retained quality build judged: refused while only a build of another
+/// tree is there, then found; and refused for a target that is no branch name.
+pub fn judged_in_quality(w: &mut World) {
+    let project = w.project.clone();
+    w.git(&project, &["switch", "--quiet", "-c", "feature"]);
+    w.write("project/src/calc.py", CALC_WITH_SUBTRACT);
+    w.git(&project, &["commit", "--quiet", "-am", "Add subtract"]);
+    let tree = w.git(&project, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    let base = w.git(&project, &["rev-parse", "main"]).trim().to_string();
+    let other = w.git(&project, &["rev-parse", "main^{tree}"]).trim().to_string();
+    let judged = ["judged-in-quality", "--quality-gate", JOB, "--target"];
+    w.retained_build(5, "SUCCESS", &format!("judged tree={other} parent={base} main={base}"));
+    w.run(&[&judged[..], &["main"]].concat());
+    w.retained_build(6, "SUCCESS", &format!("judged tree={tree} parent={base} main={base}"));
+    w.run(&[&judged[..], &["main"]].concat());
+    w.run(&[&judged[..], &["no..branch"]].concat());
+}
+
+/// A run started without the quality gate, killed in its build, resumed with --quality-gate: the Builder's report is
+/// judged before the Reviewer starts.
+pub fn gate_turned_on_by_resume(w: &mut World) {
+    w.jenkins_build(build("SUCCESS", Some("GATE: OK\n")).into());
+    w.agent("spec", [spec_written()]);
+    w.agent("build", [built(1, 0).hold("build")]);
+    w.agent("review", [approved(1)]);
+    let run = w.start(&["run", "--", TASK], true);
+    w.wait_reached("build");
+    w.invocation(run).kill();
+    w.release("build");
+    let key = w.run_key(1);
+    w.run(&["resume", "--force", "--quality-gate", JOB, &key]);
+}
+
+/// A run killed while Jenkins builds its first quality round, resumed with --no-quality-gate: its refs on origin go,
+/// and the Reviewer is told nothing judged the change.
+pub fn gate_turned_off_by_resume(w: &mut World) {
+    w.jenkins_build(build("SUCCESS", Some("GATE: OK\n")).hold("quality").into());
+    approved_roles(w);
+    let run = w.start(&gated(&["--", TASK]), true);
+    w.wait_reached("quality");
+    w.invocation(run).kill();
+    let key = w.run_key(1);
+    w.run(&["resume", "--force", "--no-quality-gate", &key]);
+}
+
 // -- Where the run works -------------------------------------------------------------
 
 /// run --worktree: the run builds in a worktree of its own from origin's main, which is removed once the pull request is
@@ -302,6 +466,13 @@ pub fn kill_in_publish(w: &mut World) {
     w.hold_pr_create("publish");
     approved_roles(w);
     killed_and_resumed(w, "publish", &["run", "--", TASK]);
+}
+
+/// Killed while Jenkins builds the quality round's snapshot; resumed, the run polls the build it recorded.
+pub fn kill_in_quality(w: &mut World) {
+    w.jenkins_build(build("SUCCESS", Some("GATE: OK\n")).hold("quality").into());
+    approved_roles(w);
+    killed_and_resumed(w, "quality", &gated(&["--", TASK]));
 }
 
 /// examples/workflows/product-team.toml killed in step hold, design or tests, and resumed.

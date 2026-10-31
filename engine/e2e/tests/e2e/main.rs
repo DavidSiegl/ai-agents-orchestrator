@@ -11,6 +11,7 @@
 mod compare;
 mod engine;
 mod scenarios;
+mod servers;
 mod world;
 
 use std::path::PathBuf;
@@ -171,9 +172,13 @@ scenarios!(
     doctor_checks,
     failed_run_closed,
     finished_run_closed,
+    gate_turned_off_by_resume,
+    gate_turned_on_by_resume,
+    judged_in_quality,
     kill_in_build,
     kill_in_design,
     kill_in_publish,
+    kill_in_quality,
     kill_in_review,
     kill_in_spec,
     kill_in_tests,
@@ -183,6 +188,11 @@ scenarios!(
     prompt_file_run,
     proofs_run,
     publish_with_conflict,
+    quality_build_failed,
+    quality_fails_then_passes,
+    quality_passes,
+    quality_stuck,
+    quality_workflow_without_review,
     resume_after_agent_exit,
     runs_listed_and_shown,
     spec_file_run,
