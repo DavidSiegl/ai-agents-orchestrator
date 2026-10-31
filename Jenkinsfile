@@ -188,9 +188,9 @@ pipeline {
                 // engine/, the Cargo workspace it builds in, the example workflows they run, and ci/, which pins the
                 // gitleaks they run; and tests/conftest.py, tests/guard_errors.py and the Python environment, which the
                 // Python harness ran them under: kept from its list (octoflow-without-python ticket 02), at the cost of
-                // a quality build that runs them when only those change. Their Python forerunner took quality build #59 past the orchestrator's
-                // QUALITY_TIMEOUT (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request
-                // builds always run them.
+                // a quality build that runs them when only those change. Their Python forerunner took quality build #59
+                // past the orchestrator's QUALITY_TIMEOUT (1299 s of 1200). A git diff that fails counts as a change,
+                // so they run. Pull request builds always run them.
                 sh '''
                     junit=target/nextest/ci/junit.xml
                     rm -f "$junit"

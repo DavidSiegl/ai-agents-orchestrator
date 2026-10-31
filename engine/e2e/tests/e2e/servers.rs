@@ -38,6 +38,8 @@ pub struct Servers {
     proxy_address: std::net::SocketAddr,
     /// true once the servers are being dropped: the proxy accepts no more connections.
     stopping: Arc<AtomicBool>,
+    /// Whether the answer to a request has panicked.
+    failed: ServerFailure,
     /// The two servers' accept loops.
     threads: Vec<JoinHandle<()>>,
 }
@@ -52,36 +54,65 @@ impl Servers {
         let jenkins_url = format!("http://127.0.0.1:{jenkins_port}");
         let proxy = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("serving the PyPI proxy: {e}"));
         let proxy_address = proxy.local_addr().unwrap_or_else(|e| panic!("the PyPI proxy's address: {e}"));
-        let stopping = Arc::new(AtomicBool::new(false));
+        let (stopping, failed) = (Arc::new(AtomicBool::new(false)), ServerFailure(Arc::new(AtomicBool::new(false))));
         let threads = vec![
             {
                 let (server, world, url) = (Arc::clone(&jenkins), world.to_path_buf(), jenkins_url.clone());
+                let failed = Arc::clone(&failed.0);
                 std::thread::spawn(move || {
                     for request in server.incoming_requests() {
-                        jenkins_answer(&world, &url, request);
+                        flag_panic(&failed, || jenkins_answer(&world, &url, request));
                     }
                 })
             },
             {
-                let (world, stopping) = (world.to_path_buf(), Arc::clone(&stopping));
-                std::thread::spawn(move || proxy_accept(&proxy, &world, &tls, &stopping))
+                let (world, stopping, failed) = (world.to_path_buf(), Arc::clone(&stopping), Arc::clone(&failed.0));
+                std::thread::spawn(move || proxy_accept(&proxy, &world, &tls, &stopping, &failed))
             },
         ];
-        Servers { jenkins, jenkins_url, proxy_url: format!("http://{proxy_address}"), proxy_address, stopping, threads }
+        let proxy_url = format!("http://{proxy_address}");
+        Servers { jenkins, jenkins_url, proxy_url, proxy_address, stopping, failed, threads }
+    }
+
+    /// Whether an answer of these servers has panicked, for what waits on the engine to check (ServerFailure::check).
+    pub fn failure(&self) -> ServerFailure {
+        self.failed.clone()
+    }
+}
+
+/// Whether the answer of a world's server to a request has panicked: that request went unanswered, or answered 500,
+/// and the panic's message is on standard error; the servers go on answering the next ones. The World checks it
+/// before it records and while it waits on the engine, so that the panic, not what it made the engine do, is what the
+/// scenario fails with.
+#[derive(Clone)]
+pub struct ServerFailure(Arc<AtomicBool>);
+
+impl ServerFailure {
+    /// Panics, failing the scenario at its cause, when an answer has panicked.
+    pub fn check(&self) {
+        assert!(!self.0.load(Ordering::SeqCst), "a server of the world panicked while answering; its message is above");
+    }
+}
+
+/// Run answer, setting failed when it panics rather than letting the panic end the server's thread.
+fn flag_panic(failed: &AtomicBool, answer: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(answer)).is_err() {
+        failed.store(true, Ordering::SeqCst);
     }
 }
 
 impl Drop for Servers {
-    /// Stops both servers; panics, failing the scenario at its cause, when one of them panicked while it served,
-    /// unless the scenario fails already.
+    /// Stops both servers and waits for their threads, whose answers' panics flag_panic caught.
     fn drop(&mut self) {
         self.jenkins.unblock();
         self.stopping.store(true, Ordering::SeqCst);
         // Wakes the proxy's accept, which then sees stopping; a failure means it no longer listens.
         let _ = TcpStream::connect(self.proxy_address);
-        let panicked = self.threads.drain(..).filter_map(|thread| thread.join().err()).count();
-        if panicked > 0 && !std::thread::panicking() {
-            panic!("{panicked} of the world's servers panicked while serving; their messages are above");
+        for thread in self.threads.drain(..) {
+            // Only a panic of the accept loops themselves, outside any answer, which none of their code raises.
+            if thread.join().is_err() {
+                eprintln!("a server of the world stopped by a panic");
+            }
         }
     }
 }
@@ -392,19 +423,20 @@ fn openssl(args: &[&str]) {
 }
 
 /// Accept the proxy's connections until stopping, each answered on a thread of its own.
-fn proxy_accept(listener: &TcpListener, world: &Path, tls: &Arc<rustls::ServerConfig>, stopping: &AtomicBool) {
+fn proxy_accept(listener: &TcpListener, world: &Path, tls: &Arc<rustls::ServerConfig>, stopping: &AtomicBool, failed: &Arc<AtomicBool>) {
     let mut connections = Vec::new();
     for stream in listener.incoming() {
         if stopping.load(Ordering::SeqCst) {
             break;
         }
         let Ok(stream) = stream else { continue };
-        let (world, tls): (PathBuf, _) = (world.to_path_buf(), Arc::clone(tls));
-        connections.push(std::thread::spawn(move || proxy_connection(stream, &world, tls)));
+        let (world, tls, failed): (PathBuf, _, _) = (world.to_path_buf(), Arc::clone(tls), Arc::clone(failed));
+        connections.push(std::thread::spawn(move || flag_panic(&failed, || proxy_connection(stream, &world, tls))));
     }
-    // A connection's panic is the proxy's: its thread panics in turn, which Servers::drop reports.
-    let panicked = connections.into_iter().filter_map(|connection| connection.join().err()).count();
-    assert_eq!(panicked, 0, "{panicked} connections to the PyPI proxy panicked");
+    for connection in connections {
+        // flag_panic caught each connection's panic.
+        let _ = connection.join();
+    }
 }
 
 /// One connection to the proxy: a CONNECT to pypi.org:443, answered by PyPI over TLS with the world's certificate;
@@ -458,4 +490,15 @@ fn a_form_is_read_as_parse_qs_reads_it() {
     assert_eq!(form, expected);
     assert_eq!(unquote("100%25%zz%e2%80%94"), "100%%zz\u{2014}");
     assert_eq!(unquote("a%+1%-1%"), "a%+1%-1%");
+}
+
+#[test]
+fn a_panicking_answer_is_flagged_and_the_next_one_still_runs() {
+    let failed = AtomicBool::new(false);
+    flag_panic(&failed, || {});
+    assert!(!failed.load(Ordering::SeqCst));
+    flag_panic(&failed, || panic!("an answer that panics"));
+    let mut ran = false;
+    flag_panic(&failed, || ran = true);
+    assert!(failed.load(Ordering::SeqCst) && ran);
 }

@@ -32,30 +32,30 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The e2e scenarios: what they do not record.** `engine/e2e/` runs 43 scenarios against the engine as a program and
   compares each with its recording (docs/architecture.md, Tests). The recordings are the Python engine's, made before
   rust-engine ticket 11 removed it, by the Python harness octoflow-without-python ticket 02 removed; a scenario added
-  since records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret
-  gitleaks finds, at a quality round or at publish; the harnesses other than claude and codex starting an agent (only
-  their arguments differ); a session log's token counts (every turn records `unknown`); `--timeout` and the stall
-  notice, which take real minutes; the GUI, which the Rust engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose
-  templates only the recorded `state.json` holds and whose text only golden files hold (docs/architecture.md, Tests);
-  and texts the engine sends or writes that neither a scenario nor a golden file reaches: `CONTINUE_PROMPT`,
-  `QUALITY_OFF_NOTE`, the pull request body of a run that ends `FINISHED` and of one whose gate was turned off after its
-  last analysis, and a body section cut at `PR_SECTION_LIMIT`. Each closes with a scenario that reaches it, its
-  recording made by the Rust engine and reviewed (found by orchestrator-test-methods/06 and its review 74, 2026-10-27,
-  against the recordings). Where gitleaks or openssl is not on PATH, every scenario fails naming it: a skip would pass
-  a machine that checked nothing, and the gate's test-integrity check fails an added skip (the user's ruling,
-  2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-tools.sh`). What a record holds by
-  design, each a choice a later ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its
-  facts (`normalize::facts`), not its words; a run's files listed by modification time, as `/files` and the event
-  stream list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
-  they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the
+  since records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks
+  finds, at a quality round or at publish; the harnesses other than claude and codex starting an agent (only their
+  arguments differ); a session log's token counts (every turn records `unknown`); `--timeout` and the stall notice,
+  which take real minutes; the GUI, which the Rust engine drops; round 2 of the example workflows and a fresh session's
+  prompts as sent, whose templates only the recorded `state.json` holds and whose text only golden files hold
+  (docs/architecture.md, Tests); and texts the engine sends or writes that neither a scenario nor a golden file reaches:
+  `CONTINUE_PROMPT`, `QUALITY_OFF_NOTE`, the pull request body of a run that ends `FINISHED` and of one whose gate was
+  turned off after its last analysis, and a body section cut at `PR_SECTION_LIMIT`. Each closes with a scenario that
+  reaches it, its recording made by the Rust engine and reviewed (found by orchestrator-test-methods/06 and its review
+  74, 2026-10-27, against the recordings). Where gitleaks or openssl is not on PATH, every scenario fails naming it: a
+  skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip (the user's
+  ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-tools.sh`). What a record
+  holds by design, each a choice a later ticket may revisit: output a human reads (logs, errors, `show`, `list`,
+  `prune`) as its facts (`normalize::facts`), not its words; a run's files listed by modification time, as `/files` and
+  the event stream list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all,
+  only what they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the
   `state.json` saves between two commands, and serve's events between two checkpoints. One engine run takes 2 to 25
   seconds a scenario (25 for serve's event stream); when a quality build runs them is the Jenkinsfile's Test stage's to
   say. Decided against (2026-10-27): scenarios as data files the harness interprets, which needed a language of their
-  own for kills, takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order,
-  which breaks on every count of polls; and a stub gitleaks where none is installed, which would record what no engine
-  run with gitleaks does. Decided against too (2026-10-27, orchestrator-test-methods/06): golden files of the engine's
-  follow-up prompts, notes, commit messages and pull request bodies, which the recordings hold as sent where a
-  scenario reaches them.
+  own for kills, takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which
+  breaks on every count of polls; and a stub gitleaks where none is installed, which would record what no engine run
+  with gitleaks does. Decided against too (2026-10-27, orchestrator-test-methods/06): golden files of the engine's
+  follow-up prompts, notes, commit messages and pull request bodies, which the recordings hold as sent where a scenario
+  reaches them.
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
@@ -173,21 +173,21 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
   2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
-  SUCCESS after 1299 s, of which Test took 888 s, UI 229 s and Gate 172 s, so `tests/contract/test_jenkins.py` failed
-  at what was then its 1200 s cap (it now waits for the build to end, checks every answer, and fails last on the time
-  the quality file took), as a quality round of the engine would: `_poll` gives up at `QUALITY_TIMEOUT` (1200 s,
+  SUCCESS after 1299 s, of which Test took 888 s, UI 229 s and Gate 172 s, so `tests/contract/test_jenkins.py` failed at
+  what was then its 1200 s cap (it now waits for the build to end, checks every answer, and fails last on the time the
+  quality file took), as a quality round of the engine would: `_poll` gives up at `QUALITY_TIMEOUT` (1200 s,
   `orchestrator.py`) from the round's start, and Gate had not begun by then. The suite grew by the parity scenarios
-  (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build,
-  so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
-  judged only after a resume. Not changed then: the Python engine was frozen (Fixed, "The Python engine was frozen
-  until the Rust engine replaced it"), so a larger `QUALITY_TIMEOUT` is the Rust engine's to set, in
-  `engine/src/constants.rs`, now that it is the engine (rust-engine ticket 11). Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the e2e scenarios depend on
-  alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches
-  `engine/Cargo.toml` and `Cargo.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
-  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
-  `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 % more. Closes when
-  a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
-  with a larger `QUALITY_TIMEOUT` in the Rust engine.
+  (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build, so a
+  run is not lost, but a quality round of this repository whose build takes as long fails once, and is judged only after
+  a resume. Not changed then: the Python engine was frozen (Fixed, "The Python engine was frozen until the Rust engine
+  replaced it"), so a larger `QUALITY_TIMEOUT` is the Rust engine's to set, in `engine/src/constants.rs`, now that it is
+  the engine (rust-engine ticket 11). Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the
+  e2e scenarios depend on alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version
+  touches `engine/Cargo.toml` and `Cargo.lock`, so its build still runs them, and so does the contract test's build of
+  main whenever main's last commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut
+  time is narrowed by `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 %
+  more. Closes when a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green
+  against one, or with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
   file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
   with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
@@ -263,14 +263,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
   began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
   run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
-- **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of
-  its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
-  running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
-  its group and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands
-  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The e2e
-  scenarios' kill kills each process below the engine too (`Invocation::kill`, `engine/e2e/tests/e2e/world.rs`), as "a crash or a lost machine" does;
-  before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
-  ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
+- **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of its
+  own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a running
+  `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in its group
+  and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands the Rust
+  engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The e2e scenarios' kill
+  kills each process below the engine too (`Invocation::kill`, `engine/e2e/tests/e2e/world.rs`), as "a crash or a lost
+  machine" does; before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes
+  with the user's ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
   `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
