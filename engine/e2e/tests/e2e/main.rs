@@ -8,6 +8,7 @@
 //! made for coverage; else this checkout's, built with cargo (engine::binary). Linux only, as the engine's other
 //! process tests.
 
+mod client;
 mod compare;
 mod engine;
 mod scenarios;
@@ -195,6 +196,7 @@ scenarios!(
     quality_workflow_without_review,
     resume_after_agent_exit,
     runs_listed_and_shown,
+    serve_endpoints_and_events,
     spec_file_run,
     specs_drained,
     takeover,

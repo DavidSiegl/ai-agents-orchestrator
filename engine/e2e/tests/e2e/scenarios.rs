@@ -4,9 +4,12 @@
 //! commands run, in which order, with which stopped midway. What the engine did in return is the world's record,
 //! compared with the recording by main.rs.
 
-use octoflow_e2e::object;
+use std::time::Instant;
+
+use octoflow_e2e::{array_at, object, object_at};
 use octoflow_engine::py::json::{Json, Map};
 
+use crate::client;
 use crate::servers::JOB;
 use crate::world::{checkout, World};
 
@@ -637,6 +640,179 @@ pub fn conflict_refreshed(w: &mut World) {
     w.run(&["refresh", &key]);
     let pr = w.pr(1);
     w.note("pull request", pr);
+}
+
+// -- serve ------------------------------------------------------------------------------
+
+/// The response headers a client of serve reads: content type, CORS and authentication.
+const SERVE_HEADERS: [&str; 7] = [
+    "Content-Type",
+    "Access-Control-Allow-Origin",
+    "Access-Control-Allow-Methods",
+    "Access-Control-Allow-Headers",
+    "Vary",
+    "WWW-Authenticate",
+    "Cache-Control",
+];
+
+/// One request to serve at address, with token as its bearer when given, as {"request", "status", "headers",
+/// "body"}: the headers of SERVE_HEADERS it sent, and the body as served, its files sorted by name where it lists a
+/// run's files, whose order is by modification time and so by the clock.
+fn serve_request(address: &str, token: Option<&str>, target: &str, method: &str, headers: &[(&str, &str)]) -> Json {
+    let bearer = token.map(|t| format!("Bearer {t}"));
+    let mut sent: Vec<(&str, &str)> = headers.to_vec();
+    if let Some(bearer) = &bearer {
+        if !sent.iter().any(|(k, _)| *k == "Authorization") {
+            sent.push(("Authorization", bearer));
+        }
+    }
+    let response = client::request(address, method, target, &sent);
+    let text = String::from_utf8_lossy(&response.body).into_owned();
+    let body = if target.starts_with("/files") && response.status == 200 {
+        let mut files = Json::parse(&text).unwrap_or_else(|e| panic!("serve's {target} is no JSON: {e}"));
+        if let Json::Object(fields) = &mut files {
+            if let Some(Json::Array(list)) = fields.get_mut("files") {
+                list.sort_by(|a, b| str_of(a, "name").cmp(str_of(b, "name")));
+            }
+        }
+        files
+    } else {
+        Json::from(text)
+    };
+    let kept = SERVE_HEADERS.iter().filter_map(|k| response.header(k).map(|v| (*k, Json::from(v))));
+    object([
+        ("request", Json::from(format!("{method} {target}"))),
+        ("status", Json::Int(response.status.into())),
+        ("headers", Json::Object(kept.collect())),
+        ("body", body),
+    ])
+}
+
+fn str_of<'a>(json: &'a Json, key: &str) -> &'a str {
+    json.get(key).and_then(Json::as_str).unwrap_or_default()
+}
+
+/// Of events, the last record and the last files of each run, and the last problem: what a client that folds the
+/// stream, as the desktop app does, holds after them. Files are sorted by name, as serve_request sorts them. An event
+/// of any other kind is kept whole, in order, under "other".
+fn last_by_run(events: &[(String, Json)]) -> Map<Json> {
+    let mut out = Map::from_iter([("records", object([])), ("files", object([]))]);
+    for (kind, payload) in events {
+        let run = || str_of(payload, "run").to_string();
+        match kind.as_str() {
+            "record" => {
+                let record = payload.get("record").cloned().unwrap_or(Json::Null);
+                object_at(&mut out, "records").insert(run(), record);
+            }
+            "files" => {
+                let mut files = payload.get("files").and_then(Json::as_array).cloned().unwrap_or_default();
+                files.sort_by(|a, b| str_of(a, "name").cmp(str_of(b, "name")));
+                object_at(&mut out, "files").insert(run(), Json::Array(files));
+            }
+            "problem" => {
+                out.insert("problem", payload.get("error").cloned().unwrap_or(Json::Null));
+            }
+            _ => array_at(&mut out, "other").push(Json::Array(vec![Json::from(kind.as_str()), payload.clone()])),
+        }
+    }
+    out
+}
+
+/// text with each character other than a letter, a digit or one of `_.-~/` written as `%XX` of its UTF-8 bytes, as
+/// Python's urllib.parse.quote writes it.
+fn quote(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || "_.-~/".contains(c) {
+            out.push(c);
+        } else {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// One checkpoint of the event stream: what it held, folded (last_by_run), while the engine waited on hold, or once
+/// the run was done for None.
+fn checkpoint(stream: &client::EventStream, hold: Option<&str>) -> Json {
+    let mut point = Map::from_iter([("waiting on", hold.map_or(Json::Null, Json::from))]);
+    for (k, v) in last_by_run(&stream.events()) {
+        point.insert(k, v);
+    }
+    Json::Object(point)
+}
+
+/// serve: its endpoints and security checks, and an event stream over a run, read at each point where the run waits
+/// on an agent, and once it is done.
+pub fn serve_endpoints_and_events(w: &mut World) {
+    let serve = w.start(&["serve", "--origin", "tauri://localhost"], true);
+    w.wait_for(|| w.invocations[serve - 1].stdout().ends_with('\n'), "serve to print its address");
+    let first = Json::parse(&w.invocation(serve).stdout()).expect("serve's first line is JSON");
+    let (url, token) = (str_of(&first, "url").to_string(), str_of(&first, "token").to_string());
+    let address = url.strip_prefix("http://").expect("serve's URL is http").to_string();
+    w.normalizer.literal(&token, "<token>");
+    w.normalizer.literal(&address, "<serve>");
+    let cwd = quote(&w.project.to_string_lossy());
+    let port = address.rsplit(':').next().expect("serve's port");
+    let runs = format!("/runs?cwd={cwd}");
+    let tok = Some(token.as_str());
+    let mut requests = vec![
+        serve_request(&address, None, &runs, "GET", &[]),
+        serve_request(&address, tok, &runs, "GET", &[("Host", &format!("evil.example:{port}"))]),
+        serve_request(&address, tok, &runs, "GET", &[("Origin", "https://evil.example")]),
+        serve_request(&address, None, &runs, "OPTIONS", &[("Origin", "tauri://localhost")]),
+        serve_request(&address, tok, &runs, "GET", &[("Origin", "tauri://localhost")]),
+        serve_request(&address, None, &format!("{runs}&token={token}"), "GET", &[("Host", &address)]),
+        serve_request(&address, tok, "/runs", "GET", &[]),
+        serve_request(&address, tok, &format!("/nothing?cwd={cwd}"), "GET", &[]),
+    ];
+    w.agent("spec", [spec_written().hold("spec")]);
+    w.agent("build", [built(1, 0).hold("build")]);
+    w.agent("review", [approved(1).hold("review")]);
+    let mut stream = client::EventStream::open(&address, &format!("/events?cwd={cwd}&token={token}"));
+    let mut checkpoints = Vec::new();
+    let run = w.start(&["run", "--", TASK], true);
+    for hold in ["spec", "build", "review"] {
+        w.wait_reached(hold);
+        let t = Instant::now();
+        w.wait_for(|| stream.settled_since(t), &format!("the event stream to settle at {hold}"));
+        checkpoints.push(checkpoint(&stream, Some(hold)));
+        w.release(hold);
+    }
+    w.invocation(run).wait();
+    let t = Instant::now();
+    w.wait_for(|| stream.settled_since(t), "the event stream to settle at the end");
+    checkpoints.push(checkpoint(&stream, None));
+    stream.close();
+    let run_id = str_of(&w.run_state(&w.run_key(1)), "run_id").to_string();
+    let file = |name: &str| format!("/file?cwd={cwd}&run={run_id}&name={name}");
+    for target in [
+        runs.clone(),
+        format!("/files?cwd={cwd}&run={run_id}"),
+        file("spec.md"),
+        file("state.json"),
+        file("..%2Fx"),
+        file("nothing.md"),
+        format!("/files?cwd={cwd}"),
+    ] {
+        requests.push(serve_request(&address, tok, &target, "GET", &[]));
+    }
+    let pid = nix::unistd::Pid::from_raw(w.invocation(serve).pid());
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).unwrap_or_else(|e| panic!("stopping serve: {e}"));
+    w.invocation(serve).wait();
+    w.note("requests", Json::Array(requests));
+    let content_type = stream.content_type.clone().map_or(Json::Null, Json::from);
+    w.note(
+        "event stream",
+        object([
+            ("status", Json::Int(stream.status.into())),
+            ("content type", content_type),
+            ("checkpoints", Json::Array(checkpoints)),
+        ]),
+    );
 }
 
 // -- The other commands -----------------------------------------------------------------
