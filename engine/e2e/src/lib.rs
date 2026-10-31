@@ -12,6 +12,7 @@ pub mod fakes;
 pub mod ledger;
 pub mod normalize;
 pub mod procs;
+pub mod scratch;
 
 use octoflow_engine::py::json::{Json, Map};
 

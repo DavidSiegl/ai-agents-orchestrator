@@ -15,6 +15,7 @@ mod world;
 
 use std::path::PathBuf;
 
+use octoflow_e2e::scratch::Scratch;
 use octoflow_engine::py::json::{unicode_string, Json};
 
 /// The recordings scenarios are checked against: `<name>.json` in a directory, each read, or, when writing, written.
@@ -99,54 +100,39 @@ fn a_recording_keeps_characters_beyond_ascii_as_they_are() {
     assert_eq!(text, "{\n \"a\": [\n  \"é \u{2014}\",\n  {},\n  []\n ],\n \"b\": {\n  \"n\": 1.5,\n  \"x\": null\n }\n}");
 }
 
-/// Recordings in a directory of the test's own, removed when dropped.
-struct ScratchRecordings(Recordings);
-
-impl ScratchRecordings {
-    fn new(name: &str, writing: bool) -> ScratchRecordings {
-        let dir = std::env::temp_dir().join(format!("octoflow-e2e-recordings-{name}-{}", std::process::id()));
-        match std::fs::remove_dir_all(&dir) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("removing {}: {e}", dir.display()),
-            _ => {}
-        }
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
-        ScratchRecordings(Recordings { dir, writing })
-    }
-}
-
-impl Drop for ScratchRecordings {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.0.dir) {
-            eprintln!("removing {}: {e}", self.0.dir.display());
-        }
-    }
+/// Recordings in a directory of the test's own, removed when dropped, writing or not.
+fn scratch_recordings(name: &str, writing: bool) -> (Scratch, Recordings) {
+    let scratch = Scratch::new(&format!("recordings-{name}"));
+    let recordings = Recordings { dir: scratch.path().to_path_buf(), writing };
+    (scratch, recordings)
 }
 
 /// A scenario with no recording fails, rather than passing for want of anything to compare.
 #[test]
 #[should_panic(expected = "scenario check_unrecorded has no recording")]
 fn a_scenario_without_a_recording_fails() {
-    ScratchRecordings::new("unrecorded", false).0.check("check_unrecorded", |_| {});
+    let (_scratch, recordings) = scratch_recordings("unrecorded", false);
+    recordings.check("check_unrecorded", |_| {});
 }
 
 /// A scenario whose record differs from its recording fails, naming where.
 #[test]
 #[should_panic(expected = "scenario check_differs differs from its recording at $: key \"invocations\" only in this run")]
 fn a_scenario_that_differs_from_its_recording_fails() {
-    let recordings = ScratchRecordings::new("differs", false);
-    let path = recordings.0.dir.join("check_differs.json");
+    let (_scratch, recordings) = scratch_recordings("differs", false);
+    let path = recordings.dir.join("check_differs.json");
     std::fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
-    recordings.0.check("check_differs", |_| {});
+    recordings.check("check_differs", |_| {});
 }
 
 /// A recording written holds the scenario: a check that compares with it passes.
 #[test]
 fn a_recording_written_holds_the_scenario_again() {
-    let mut recordings = ScratchRecordings::new("written", true);
+    let (_scratch, mut recordings) = scratch_recordings("written", true);
     let scenario = |w: &mut world::World| w.note("seen", Json::from("once"));
-    recordings.0.check("check_written", scenario);
-    recordings.0.writing = false;
-    recordings.0.check("check_written", scenario);
+    recordings.check("check_written", scenario);
+    recordings.writing = false;
+    recordings.check("check_written", scenario);
 }
 
 /// A #[test] for each scenario, by its name in scenarios.rs.

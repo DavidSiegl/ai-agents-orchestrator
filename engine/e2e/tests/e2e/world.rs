@@ -18,6 +18,7 @@ use nix::unistd::Pid;
 use octoflow_e2e::fakes::AGENT_KINDS;
 use octoflow_e2e::ledger::{write_atomically, Ledger, INVOCATION_VAR};
 use octoflow_e2e::normalize::{facts, Normalizer};
+use octoflow_e2e::scratch::Scratch;
 use octoflow_e2e::{array_at, object, object_at, procs, str_at, strings};
 use octoflow_engine::py::json::{Json, Map};
 use octoflow_engine::py::text::shlex_quote;
@@ -171,8 +172,9 @@ fn read_lossy(path: &Path) -> String {
 /// output). Dropping it kills any invocation still running and removes the directory, unless the scenario failed,
 /// when the directory is kept for a look and its path printed.
 pub struct World {
-    /// The world's directory, its symbolic links resolved.
-    pub root: PathBuf,
+    /// The world's directory, removed when the world is dropped, or kept when the scenario failed. Fields drop after
+    /// World's own drop has killed the invocations, so nothing of the engine's still runs in it then.
+    scratch: Scratch,
     /// The git checkout the engine runs in, `root/project`.
     pub project: PathBuf,
     /// The bare repository that is the project's origin, `root/origin.git`.
@@ -207,15 +209,8 @@ impl World {
         if find_on_path("gitleaks").is_none() {
             panic!("gitleaks is not on PATH; the e2e scenarios need it");
         }
-        let base = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-        let dir = base.join(format!("octoflow-e2e-{scenario}-{}", std::process::id()));
-        // A world an earlier run of the scenario kept, with this process's pid.
-        match fs::remove_dir_all(&dir) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("removing {}: {e}", dir.display()),
-            _ => {}
-        }
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
-        let root = dir.canonicalize().unwrap_or_else(|e| panic!("resolving {}: {e}", dir.display()));
+        let scratch = Scratch::kept_on_failure(scenario);
+        let root = scratch.path().to_path_buf();
         let mut normalizer = Normalizer::new();
         normalizer.literal(&root.to_string_lossy(), "<world>");
         normalizer.literal(&checkout().to_string_lossy(), "<checkout>");
@@ -234,7 +229,7 @@ impl World {
         }
         let world = World {
             ledger: Ledger::new(&root),
-            root,
+            scratch,
             project,
             origin,
             engine: engine.to_path_buf(),
@@ -247,6 +242,11 @@ impl World {
         world.make_bin();
         world.make_repositories();
         world
+    }
+
+    /// The world's directory, its symbolic links resolved.
+    pub fn root(&self) -> &Path {
+        self.scratch.path()
     }
 
     // -- Scripting the world ------------------------------------------------
@@ -311,7 +311,7 @@ impl World {
 
     /// Write text to path, relative to the world's directory, making its directories; returns its full path.
     pub fn write(&self, path: &str, text: &str) -> String {
-        let full = self.root.join(path);
+        let full = self.root().join(path);
         if let Some(dir) = full.parent() {
             fs::create_dir_all(dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
         }
@@ -322,9 +322,9 @@ impl World {
     /// Commit files, path to text, on origin's main, as another developer's push would, without touching the project's
     /// checkout.
     pub fn push_to_origin(&self, files: &[(&str, &str)], message: &str) {
-        let clone = self.root.join("tmp").join("pusher");
+        let clone = self.root().join("tmp").join("pusher");
         if !clone.exists() {
-            self.git(&self.root, &["clone", "--quiet", &self.origin.to_string_lossy(), &clone.to_string_lossy()]);
+            self.git(self.root(), &["clone", "--quiet", &self.origin.to_string_lossy(), &clone.to_string_lossy()]);
         }
         self.git(&clone, &["fetch", "--quiet", "origin"]);
         self.git(&clone, &["checkout", "--quiet", "-B", "main", "origin/main"]);
@@ -367,7 +367,7 @@ impl World {
     /// as doctor's versions of git, which the scenario notes what it needs of.
     pub fn start(&mut self, args: &[&str], output_recorded: bool) -> usize {
         let n = self.invocations.len() + 1;
-        let out_path = self.root.join("out").join(n.to_string());
+        let out_path = self.root().join("out").join(n.to_string());
         let stdout = fs::File::create(&out_path).unwrap_or_else(|e| panic!("making {}: {e}", out_path.display()));
         let stderr_path = err_path(&out_path);
         let stderr = fs::File::create(&stderr_path).unwrap_or_else(|e| panic!("making {}: {e}", stderr_path.display()));
@@ -440,13 +440,13 @@ impl World {
     fn env(&self, n: Option<usize>) -> Vec<(String, String)> {
         let path = std::env::var("PATH").unwrap_or_default();
         let mut env = vec![
-            ("PATH".to_string(), format!("{}:{path}", self.root.join("bin").display())),
-            ("HOME".to_string(), self.root.join("home").display().to_string()),
-            ("XDG_CONFIG_HOME".to_string(), self.root.join("config").display().to_string()),
-            ("TMPDIR".to_string(), self.root.join("tmp").display().to_string()),
+            ("PATH".to_string(), format!("{}:{path}", self.root().join("bin").display())),
+            ("HOME".to_string(), self.root().join("home").display().to_string()),
+            ("XDG_CONFIG_HOME".to_string(), self.root().join("config").display().to_string()),
+            ("TMPDIR".to_string(), self.root().join("tmp").display().to_string()),
             ("LC_ALL".to_string(), "C.UTF-8".to_string()),
             ("TZ".to_string(), "UTC".to_string()),
-            ("GIT_CONFIG_GLOBAL".to_string(), self.root.join("gitconfig").display().to_string()),
+            ("GIT_CONFIG_GLOBAL".to_string(), self.root().join("gitconfig").display().to_string()),
             ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
         ];
         let Some(n) = n else {
@@ -465,12 +465,12 @@ impl World {
     // -- Making the world -------------------------------------------------------
 
     fn write_script(&self) {
-        write_atomically(&self.root.join("script.json"), &Json::Object(self.script.clone()).dumps());
+        write_atomically(&self.root().join("script.json"), &Json::Object(self.script.clone()).dumps());
     }
 
     /// Shims of the fakes in bin/, and the harnesses' CLIs.
     fn make_bin(&self) {
-        let root = shlex_quote(&self.root.to_string_lossy());
+        let root = shlex_quote(&self.root().to_string_lossy());
         let mut shims: Vec<(String, String)> = fakes()
             .iter()
             .map(|(name, fake)| ((*name).to_string(), format!("exec {} {root} \"$@\"", shlex_quote(fake))))
@@ -478,7 +478,7 @@ impl World {
         // The harnesses' CLIs, which doctor looks for on PATH and herdr would start: nothing runs them here.
         shims.extend(AGENT_KINDS.iter().map(|kind| ((*kind).to_string(), "exit 0".to_string())));
         for (program, body) in shims {
-            let path = self.root.join("bin").join(program);
+            let path = self.root().join("bin").join(program);
             fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
                 .unwrap_or_else(|e| panic!("making {} executable: {e}", path.display()));
@@ -489,10 +489,10 @@ impl World {
         let config = format!(
             "[user]\n\tname = {GIT_NAME}\n\temail = {GIT_EMAIL}\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n"
         );
-        let path = self.root.join("gitconfig");
+        let path = self.root().join("gitconfig");
         fs::write(&path, config).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
-        self.git(&self.root, &["init", "--quiet", "--bare", "-b", "main", &self.origin.to_string_lossy()]);
-        self.git(&self.root, &["init", "--quiet", "-b", "main", &self.project.to_string_lossy()]);
+        self.git(self.root(), &["init", "--quiet", "--bare", "-b", "main", &self.origin.to_string_lossy()]);
+        self.git(self.root(), &["init", "--quiet", "-b", "main", &self.project.to_string_lossy()]);
         for (path, text) in PROJECT_FILES {
             self.write(&format!("project/{path}"), text);
         }
@@ -709,11 +709,6 @@ impl Drop for World {
             if inv.running() {
                 inv.kill();
             }
-        }
-        if std::thread::panicking() {
-            eprintln!("the world is kept at {}", self.root.display());
-        } else if let Err(e) = fs::remove_dir_all(&self.root) {
-            eprintln!("removing the world at {}: {e}", self.root.display());
         }
     }
 }

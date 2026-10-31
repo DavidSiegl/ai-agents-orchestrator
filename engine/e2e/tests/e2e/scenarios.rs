@@ -411,7 +411,7 @@ pub fn specs_drained(w: &mut World) {
     }
     w.agent("build", [built(1, 0)]);
     w.agent("review", [approved(1)]);
-    let dir = format!("{}/specs", w.root.display());
+    let dir = format!("{}/specs", w.root().display());
     w.run(&["drain", "--dry-run", &dir]);
     w.run(&["drain", &dir]);
     w.set_pr(1, &merged());

@@ -229,20 +229,15 @@ pub fn wait_until(ledger: &Ledger, mut f: impl FnMut(&mut Map<Json>) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
 
     /// A project in a directory of its own, removed when dropped: runs holds each run's directory name and the text of
     /// its state.json, or None for a run directory without one.
-    struct Project(PathBuf);
+    struct Project(Scratch);
 
     impl Project {
         fn new(name: &str, runs: &[(&str, Option<&str>)]) -> Project {
-            let dir = std::env::temp_dir().join(format!("octoflow-e2e-ledger-{name}-{}", std::process::id()));
-            match fs::remove_dir_all(&dir) {
-                Err(e) if e.kind() != ErrorKind::NotFound => panic!("removing {}: {e}", dir.display()),
-                _ => {}
-            }
-            fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
-            let project = Project(dir);
+            let project = Project(Scratch::new(&format!("ledger-{name}")));
             for (run, text) in runs {
                 let run_dir = project.runs().join(run);
                 fs::create_dir_all(&run_dir).unwrap_or_else(|e| panic!("making {}: {e}", run_dir.display()));
@@ -254,7 +249,7 @@ mod tests {
         }
 
         fn runs(&self) -> PathBuf {
-            self.0.join(".orchestrator").join("runs")
+            self.0.path().join(".orchestrator").join("runs")
         }
 
         fn state_path(&self, run: &str) -> String {
@@ -269,16 +264,8 @@ mod tests {
         /// The paths changed_states finds changed, in its order, for an engine of pids.
         fn changed(&self, state: &mut Map<Json>, pids: &[i32]) -> Vec<String> {
             let pids: BTreeSet<i32> = pids.iter().copied().collect();
-            let changed = changed_states(state, &self.0, &pids);
+            let changed = changed_states(state, self.0.path(), &pids);
             changed.iter().map(|c| crate::str_at(c, "path").to_string()).collect()
-        }
-    }
-
-    impl Drop for Project {
-        fn drop(&mut self) {
-            if let Err(e) = fs::remove_dir_all(&self.0) {
-                eprintln!("removing {}: {e}", self.0.display());
-            }
         }
     }
 
