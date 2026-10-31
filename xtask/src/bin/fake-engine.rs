@@ -1,4 +1,4 @@
-//! A stand-in for the engine `cargo xtask eval` runs, for tests/eval.rs: a program that plays one scripted run.
+//! A stand-in for the engine `cargo xtask eval` runs, for tests/eval/: a program that plays one scripted run.
 //!
 //! The script is the JSON file FAKE_ENGINE_PLAN names, an object of:
 //!

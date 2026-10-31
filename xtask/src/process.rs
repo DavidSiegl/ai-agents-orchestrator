@@ -37,11 +37,19 @@ pub(crate) fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
 }
 
+/// The variables by which git, run from a hook or another git command, would work on that repository instead of the
+/// one its command line or working directory names.
+const GIT_REPOSITORY_ENV: &[&str] = &["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY"];
+
 /// A Command for program that starts with SIGINT unblocked, so that it hears a Ctrl-C as one started from a shell
-/// does, whether or not [`watch_interrupts`] blocked it here.
+/// does, whether or not [`watch_interrupts`] blocked it here; and without GIT_REPOSITORY_ENV, so that a git it runs,
+/// or the engine's, works on the repository it names, also when the chore runs from a git hook.
 pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(program);
+    for name in GIT_REPOSITORY_ENV {
+        command.env_remove(name);
+    }
     let sigint = SigSet::from(Signal::SIGINT);
     // SAFETY: the closure runs in the child between fork and exec, where only async-signal-safe functions may be
     // called; it calls pthread_sigmask alone, which is one (POSIX.1-2008, signal-safety(7)), on a set made before the

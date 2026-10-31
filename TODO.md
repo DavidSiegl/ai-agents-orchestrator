@@ -847,15 +847,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
-- **The eval set's code had review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
-  brought. Fixed (2026-10-31, octoflow-without-python ticket 08) by the port of the eval set to Rust, `cargo xtask
-  eval` and `cargo xtask bundles` with Rust toy repositories: the docs task's hidden test reads a fence indented by
-  up to three spaces, and closes it only on a run of its own character at least as long (`usage` in
-  `evals/tasks/docs/hidden_test.rs`, F1, F2); a metrics.json value of the wrong type counts as missing
-  (`run_metrics` in `xtask/src/eval.rs`, F3); the bundles' git runs without `GIT_DIR`, `GIT_INDEX_FILE`,
-  `GIT_WORK_TREE` and `GIT_OBJECT_DIRECTORY` (`GIT_REPOSITORY_ENV` in `xtask/src/bundles.rs`, F4); the runner names
-  what did not pass from `cargo test`'s `test NAME ... FAILED` lines, and says so when none failed (`test_output`, F5);
-  and a clone that cannot be removed is reported (`run_trial`, F6).
+- **The eval set's code had review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167 brought.
+  Fixed (2026-10-31, octoflow-without-python ticket 08) by the port of the eval set to Rust, `cargo xtask eval` and
+  `cargo xtask bundles` with Rust toy repositories: the docs task's hidden test reads a fence indented by up to three
+  spaces, and closes it only on a run of its own character at least as long (`usage` in
+  `evals/tasks/docs/hidden_test.rs`, F1, F2); a metrics.json value of the wrong type counts as missing (`run_metrics` in
+  `xtask/src/eval.rs`, F3); the bundles' git runs without `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_WORK_TREE` and
+  `GIT_OBJECT_DIRECTORY` (`GIT_REPOSITORY_ENV` in `xtask/src/process.rs`, for every command the chores start, F4); the
+  runner names what did not pass from `cargo test`'s `test NAME ... FAILED` lines, and says so when none failed
+  (`test_output`, F5); and a clone that cannot be removed is reported (`run_trial`, F6).
 
 - **The gate judges Rust as it judges Python.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). Fixed (2026-10-30,
   every ticket of it). The helper the checks read Rust through: `ci/gate-rust/`, a crate on syn whose JSON

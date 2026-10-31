@@ -141,6 +141,18 @@ fn refactor_is_judged() {
 }
 
 #[test]
+fn a_cargo_toml_that_leaves_the_hidden_test_unbuilt_fails_the_trial() {
+    let engine = FakeEngine::new();
+    let mut files = solutions::solution("feature");
+    let manifest = xtask::toy_repos::TOY_REPOS.iter().find(|r| r.task == "feature").expect("feature").files;
+    let toml = manifest.iter().find(|(p, _)| *p == "Cargo.toml").expect("its Cargo.toml").1;
+    files.push(("Cargo.toml".to_string(), toml.replace("publish = false\n", "publish = false\nautotests = false\n")));
+    engine.plan(Plan { files, ..Plan::default() });
+    let trial = engine.trial("feature", &[], false, 1);
+    assert!(!trial.passed, "{}", trial.hidden_test_output);
+}
+
+#[test]
 fn every_task_has_a_toy_repository() {
     let tasks: Vec<String> =
         eval::load_tasks(None, &real_tasks_dir()).expect("the tasks load").into_iter().map(|t| t.name).collect();
@@ -346,16 +358,36 @@ fn one_task_has_no_all_row() {
 }
 
 #[test]
-fn test_output_names_the_failed_tests_last() {
-    let text = "running 2 tests\ntest a ... ok\ntest b ... FAILED\ntest c ... FAILED\n\nerror: 1 target failed\n";
-    assert_eq!(eval::test_output(text, false).lines().last(), Some("not accepted: b, c"));
-    let unbuilt = eval::test_output("error[E0432]: unresolved import\n", false);
+fn judge_names_the_failed_tests_last_by_target() {
+    let text = "     Running unittests src/lib.rs (target/debug/deps/durations-1a)\nrunning 1 test\n\
+                test one_unit ... FAILED\n     Running tests/hidden_test.rs (target/debug/deps/hidden_test-2b)\n\
+                running 2 tests\ntest a ... ok\ntest one_unit ... FAILED\n\nerror: 2 targets failed\n";
+    let (passed, output) = eval::judge(text, false);
+    assert!(!passed);
+    assert_eq!(output.lines().last(), Some("not accepted: lib::one_unit, hidden_test::one_unit"));
+    let (passed, unbuilt) = eval::judge("error[E0432]: unresolved import\n", false);
+    assert!(!passed);
     assert!(unbuilt.lines().last().is_some_and(|line| line.starts_with("not accepted: no test failed")), "{unbuilt}");
-    let long: String = (0..40).map(|n| format!("line {n}\n")).collect();
-    let passed = eval::test_output(&long, true);
+}
+
+#[test]
+fn judge_accepts_only_when_the_hidden_test_ran() {
+    let ran = "     Running tests/hidden_test.rs (target/debug/deps/hidden_test-2b)\ntest result: ok. 1 passed\n";
+    assert_eq!(eval::judge(ran, true), (true, ran.trim_end().to_string()));
+    let elsewhere = "     Running tests/other.rs (target/debug/deps/hidden_test-2b)\ntest result: ok. 1 passed\n";
+    let (passed, output) = eval::judge(elsewhere, true);
+    assert!(!passed);
+    assert!(output.ends_with("not accepted: tests/hidden_test.rs did not run; Cargo.toml keeps it out"), "{output}");
+}
+
+#[test]
+fn judge_keeps_the_last_lines() {
+    let long: String =
+        (0..40).map(|n| format!("line {n}\n")).collect::<String>() + "     Running tests/hidden_test.rs (x)\n";
+    let (_, passed) = eval::judge(&long, true);
     assert_eq!(passed.lines().count(), eval::HIDDEN_TEST_TAIL_LINES);
-    assert_eq!(passed.lines().last(), Some("line 39"));
-    assert_eq!(eval::test_output(&long, false).lines().count(), eval::HIDDEN_TEST_TAIL_LINES);
+    assert_eq!(passed.lines().last(), Some("     Running tests/hidden_test.rs (x)"));
+    assert_eq!(eval::judge(&long, false).1.lines().count(), eval::HIDDEN_TEST_TAIL_LINES);
 }
 
 fn evaluation() -> Eval {
@@ -456,8 +488,19 @@ fn the_engines_other_flags_pass() {
 }
 
 #[test]
+fn the_runners_flags_by_any_start_of_one() {
+    let args = eval::parse_args(&strings(&["--ta", "docs", "--rep=3", "--con", "c", "--k"])).expect("they parse");
+    assert_eq!(
+        (args.tasks, args.repeat, args.config, args.keep),
+        (Some(strings(&["docs"])), 3, Some("c".into()), true)
+    );
+}
+
+#[test]
 fn usage_errors() {
-    for argv in [&["--repeat", "0"][..], &["--repeat", "x"], &["--tasks"], &["--nope"], &["--keep=1"]] {
+    for argv in
+        [&["--repeat", "0"][..], &["--repeat", "x"], &["--tasks"], &["--nope"], &["--keep=1"], &["-x"], &["--t"]]
+    {
         assert!(eval::parse_args(&strings(argv)).is_err(), "{argv:?}");
     }
 }
@@ -467,6 +510,10 @@ fn the_engine_is_eval_engine_split_as_a_shell_splits_it() {
     let engine = eval::engine_command(Some(r#"target/debug/octoflow --flag 'a b' "c \"d\"" e\ f"#), Path::new("/"));
     assert_eq!(engine, Ok(strings(&["target/debug/octoflow", "--flag", "a b", "c \"d\"", "e f"])));
     assert!(eval::engine_command(Some("x 'unclosed"), Path::new("/")).is_err());
+    assert!(
+        eval::engine_command(Some("x \\"), Path::new("/")).is_err(),
+        "a trailing backslash, as shlex.split refuses"
+    );
 }
 
 #[test]
@@ -503,6 +550,13 @@ fn run_prints_the_table_and_appends_a_line_per_trial() {
     let out = String::from_utf8(out).expect("the table is UTF-8");
     assert_eq!(status, 0, "{out}");
     let row = out.lines().nth(1).expect("a row");
+    let shown = out.lines().last().and_then(|line| line.strip_prefix("results appended to ")).expect("where they went");
+    let cwd = std::env::current_dir().expect("the test's directory");
+    assert!(shown.starts_with("../"), "{shown}: not relative to {}", cwd.display());
+    assert_eq!(
+        cwd.join(shown).canonicalize().ok(),
+        checkout.path().join("evals/results").join(Path::new(shown).file_name().expect("a name")).canonicalize().ok()
+    );
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!((cells[..5].to_vec(), cells[6]), (vec!["feature", "2", "2/2", "2.0", "0.0"], "118"), "{row}");
     let results = checkout.path().join("evals/results");

@@ -3,8 +3,9 @@
 //! files.
 //!
 //! A bundle holds one commit, on `main`, whose id depends only on its files: the author, committer, dates and message
-//! are fixed, and neither the user's git configuration nor a repository git's environment names is read. So `--check`
-//! compares commit ids, not bytes, which another git version may pack differently.
+//! are fixed, and neither the user's git configuration nor a repository git's environment names is read
+//! (crate::process::command). So `--check` compares commit ids, not bytes, which another git version may pack
+//! differently.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,9 +31,6 @@ const COMMIT_ENV: &[(&str, &str)] = &[
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("GIT_CONFIG_NOSYSTEM", "1"),
 ];
-
-/// The variables by which git, run from a hook or another git command, would work on that repository instead.
-const GIT_REPOSITORY_ENV: &[&str] = &["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY"];
 
 /// The command line `cargo xtask bundles [--check]`: write every task's bundle, saying where and its commit, or check
 /// them; the exit status is 0, or 1 when a bundle is missing or stale under --check or git fails, or 2 for a usage
@@ -131,14 +129,11 @@ fn message(task: &str) -> String {
     format!("The starting point of the eval task {task}")
 }
 
-/// The standard output of git args, run in cwd with COMMIT_ENV and without GIT_REPOSITORY_ENV. Errors: git could not
-/// start, or failed; the error holds its standard error.
+/// The standard output of git args, run in cwd with COMMIT_ENV, as [`command`] starts it. Errors: git could not start,
+/// or failed; the error holds its standard error.
 fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
     let mut git = command("git");
     git.arg("-C").arg(cwd).args(args).envs(COMMIT_ENV.iter().copied());
-    for name in GIT_REPOSITORY_ENV {
-        git.env_remove(name);
-    }
     let output = git.output().map_err(|e| Error(format!("could not run git {}: {e}", args[0])))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

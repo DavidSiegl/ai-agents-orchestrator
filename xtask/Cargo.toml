@@ -17,7 +17,7 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 # cargo's build messages, a run's metrics.json, the eval's result lines and the fake engine's plan and log.
 serde_json = "1"
 
-# A stand-in for the engine, for tests/eval.rs: a binary of this package, so that its tests find it by
+# A stand-in for the engine, for tests/eval/: a binary of this package, so that its tests find it by
 # CARGO_BIN_EXE_fake-engine, which Cargo sets only for a test's own package.
 [[bin]]
 name = "fake-engine"

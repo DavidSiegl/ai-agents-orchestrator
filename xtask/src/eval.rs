@@ -18,8 +18,9 @@
 //! - repo.bundle, a git bundle of the toy repository, a Rust crate, at its starting commit, on main (`cargo xtask
 //!   bundles`, crate::bundles);
 //! - hidden_test.rs, the acceptance test: after the run, the runner copies it into the clone's `tests/` and runs
-//!   `cargo test --no-fail-fast` there, so that the crate's own tests run beside it; exit status 0 accepts the change.
-//!   It may read the clone's origin/main, the starting commit, which the run never moves.
+//!   `cargo test --no-fail-fast` there, so that the crate's own tests run beside it; the change is accepted when cargo
+//!   succeeds and the hidden test was among what it ran ([`judge`]). It may read the clone's origin/main, the
+//!   starting commit, which the run never moves.
 //!
 //! Exit status: 0 when every trial ran, whatever its tests said; 1 for an error of the runner's own, such as an unknown
 //! task or a bundle that cannot be cloned; 2 for a usage error; 130 when interrupted, after the trials before.
@@ -55,8 +56,8 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// How a result line names the engine a trial ran without EVAL_ENGINE: this checkout's own build.
 pub const DEFAULT_ENGINE: &str = "this checkout's build";
 const USAGE: &str = "usage: cargo xtask eval [--tasks a,b] [--repeat N] [--config NAME] [--keep] [-- RUN_ARGS...]";
-/// The variables by which a cargo started from a cargo build, such as cargo-llvm-cov's, would build the toy crate
-/// with that build's flags, or into its target directory, rather than as a project of its own.
+/// The variables by which a cargo started from a cargo build, such as cargo-llvm-cov's, would build with that build's
+/// flags, or into its target directory, rather than as a project of its own (fn cargo).
 const CARGO_BUILD_ENV: &[&str] = &[
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
@@ -181,19 +182,19 @@ pub fn load_tasks(names: Option<&[String]>, tasks_dir: &Path) -> Result<Vec<Task
 }
 
 /// The engine every trial runs: eval_engine, EVAL_ENGINE's value, split as a shell splits words, when it is set and
-/// not empty; else this checkout's own, as [`built_engine`] builds it. Errors: eval_engine has an unclosed quote, or
-/// the build failed.
+/// not empty; else this checkout's own, as [`built_engine`] builds it. Errors: eval_engine has an unclosed quote or
+/// escape, or the build failed.
 pub fn engine_command(eval_engine: Option<&str>, checkout: &Path) -> Result<Vec<String>, Error> {
     match eval_engine.filter(|command| !command.is_empty()) {
         Some(command) => {
-            split_words(command).ok_or_else(|| Error(format!("EVAL_ENGINE has an unclosed quote: {command}")))
+            split_words(command).ok_or_else(|| Error(format!("EVAL_ENGINE has an unclosed quote or escape: {command}")))
         }
         None => Ok(vec![built_engine(checkout)?.to_string_lossy().into_owned()]),
     }
 }
 
-/// command split into words as a POSIX shell splits it, quotes and backslashes removed, without expansions; None
-/// when a quote is not closed.
+/// command split into words as a POSIX shell splits it, quotes and backslashes removed, without expansions, as
+/// Python's shlex.split splits it; None when a quote is not closed or a backslash ends it.
 fn split_words(command: &str) -> Option<Vec<String>> {
     let mut words = vec![];
     let mut word: Option<String> = None;
@@ -229,10 +230,9 @@ fn split_words(command: &str) -> Option<Vec<String>> {
             }
             '\\' => {
                 let w = word.get_or_insert_with(String::new);
-                match chars.next() {
-                    Some('\n') => {}
-                    Some(c) => w.push(c),
-                    None => w.push('\\'),
+                match chars.next()? {
+                    '\n' => {}
+                    c => w.push(c),
                 }
             }
             c => word.get_or_insert_with(String::new).push(c),
@@ -243,11 +243,16 @@ fn split_words(command: &str) -> Option<Vec<String>> {
 }
 
 /// The path of checkout's orchestrator binary, `cargo build --locked -p octoflow-engine --bin orchestrator` run there
-/// first, wherever its target directory is. Errors: cargo is missing or fails, or reports no such binary.
+/// first, into checkout's target/xtask-engine. Errors: cargo is missing or fails, or reports no such binary.
 pub fn built_engine(checkout: &Path) -> Result<PathBuf, Error> {
-    let output = command("cargo")
+    // A target directory of its own, as engine/e2e/tests/e2e/engine.rs's build() has: the engine built alone resolves
+    // its dependencies' features without the other members', so in the workspace's target directory it would relink
+    // the orchestrator the engine's own tests run meanwhile.
+    let output = cargo()
         .args(["build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator"])
         .arg("--message-format=json")
+        .arg("--target-dir")
+        .arg(checkout.join("target/xtask-engine"))
         .current_dir(checkout)
         .stderr(Stdio::piped())
         .output()
@@ -294,18 +299,25 @@ pub fn config_name(run_args: &[String]) -> String {
 /// Neither the hidden test nor the task's directory is reachable from the clone: the spec is a copy beside it, and
 /// its origin a copy of the bundle. The engine's output goes to this process's standard error, the hidden test's into
 /// the result. Errors: [`Halt::Failed`] when the bundle cannot be cloned or the hidden test cannot be started;
-/// [`Halt::Interrupted`] after a Ctrl-C, once the engine has stopped, leaving the directory for a resume.
+/// [`Halt::Interrupted`] after a Ctrl-C, once the command it reached has stopped, leaving the directory for a resume.
 pub fn run_trial(task: &Task, repeat: u32, engine: &[String], run_args: &[String], keep: bool) -> Result<Trial, Halt> {
     let work = make_temp_dir(&format!("octoflow-eval-{}-", task.name))
         .map_err(|e| Error(format!("task {}: could not make its directory: {e}", task.name)))?;
     let repo = work.join("repo");
-    let trial = judged_trial(task, repeat, engine, run_args, &work, &repo);
+    let trial = match judged_trial(task, repeat, engine, run_args, &work, &repo) {
+        // A command the Ctrl-C reached failed by it.
+        Err(Halt::Failed(_)) if interrupted() => Err(Halt::Interrupted),
+        trial => trial,
+    };
     if trial == Err(Halt::Interrupted) {
         eprintln!("interrupted: the run's clone stays in {}", repo.display());
-    } else if keep {
+    }
+    if keep {
         eprintln!("{} #{repeat}: kept in {}", task.name, work.display());
-    } else if let Err(e) = fs::remove_dir_all(&work) {
-        eprintln!("warning: could not remove {}: {e}", work.display());
+    } else if trial != Err(Halt::Interrupted) {
+        if let Err(e) = fs::remove_dir_all(&work) {
+            eprintln!("warning: could not remove {}: {e}", work.display());
+        }
     }
     trial
 }
@@ -333,6 +345,9 @@ fn judged_trial(
     match &known.run_id {
         Some(run_id) => close(engine, run_id, repo),
         None => eprintln!("warning: the engine left no run directory under {RUNS_DIR} in {}", repo.display()),
+    }
+    if interrupted() {
+        return Err(Halt::Interrupted);
     }
     let (passed, hidden_test_output) = run_hidden_test(task, repo, work)?;
     Ok(Trial {
@@ -386,6 +401,15 @@ fn run_engine(argv: &[String]) -> Result<i32, Halt> {
     Ok(exit_code(status))
 }
 
+/// A Command for cargo, as [`command`] makes one, without CARGO_BUILD_ENV.
+fn cargo() -> std::process::Command {
+    let mut cargo = command("cargo");
+    for name in CARGO_BUILD_ENV {
+        cargo.env_remove(name);
+    }
+    cargo
+}
+
 /// status as a number: the exit status, or minus the number of the signal that ended the process, as Python's
 /// subprocess gives it.
 fn exit_code(status: ExitStatus) -> i32 {
@@ -393,9 +417,9 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// Whether task's hidden test accepts repo, and the last lines of its output: hidden_test.rs copied into repo's
-/// tests/, and `cargo test --no-fail-fast` run there with its build in work, its output in work's hidden_test.log. A
-/// hidden test that runs over HIDDEN_TEST_TIMEOUT fails. Errors: [`Halt::Failed`] when it cannot be started;
-/// [`Halt::Interrupted`] at a Ctrl-C, once it has been stopped.
+/// tests/, and `cargo test --no-fail-fast` run there with its build in work, its output in work's hidden_test.log, as
+/// [`judge`] reads it. A hidden test that runs over HIDDEN_TEST_TIMEOUT fails. Errors: [`Halt::Failed`] when it cannot
+/// be started; [`Halt::Interrupted`] at a Ctrl-C, once it has been stopped.
 fn run_hidden_test(task: &Task, repo: &Path, work: &Path) -> Result<(bool, String), Halt> {
     let failed = |e: io::Error| Error(format!("task {}: could not run its hidden test: {e}", task.name));
     let tests = repo.join("tests");
@@ -403,11 +427,8 @@ fn run_hidden_test(task: &Task, repo: &Path, work: &Path) -> Result<(bool, Strin
     fs::copy(task.hidden_test(), tests.join("hidden_test.rs")).map_err(failed)?;
     let log_path = work.join("hidden_test.log");
     let log = File::create(&log_path).map_err(failed)?;
-    let mut cargo = command("cargo");
+    let mut cargo = cargo();
     cargo.args(["test", "--no-fail-fast"]).current_dir(repo).env("CARGO_TARGET_DIR", work.join("target"));
-    for name in CARGO_BUILD_ENV {
-        cargo.env_remove(name);
-    }
     // A group of its own, so that a timeout or a Ctrl-C ends the test binaries cargo started, not cargo alone.
     cargo.process_group(0).stdin(Stdio::null()).stdout(log.try_clone().map_err(failed)?).stderr(log);
     let child = cargo.spawn().map_err(failed)?;
@@ -417,7 +438,7 @@ fn run_hidden_test(task: &Task, repo: &Path, work: &Path) -> Result<(bool, Strin
         Waited::Interrupted => return Err(Halt::Interrupted),
     };
     let text = fs::read(&log_path).map_err(failed)?;
-    Ok((status.success(), test_output(&String::from_utf8_lossy(&text), status.success())))
+    Ok(judge(&String::from_utf8_lossy(&text), status.success()))
 }
 
 /// How a command started in a process group of its own ended.
@@ -446,29 +467,48 @@ fn wait_for_group(mut child: Child, timeout: Duration) -> io::Result<Waited> {
             continue;
         };
         let group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap_or(i32::MAX));
-        // The group may have ended since try_wait; then there is nothing to kill.
-        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL) {
+            // ESRCH: the group ended since try_wait, and there is nothing to kill.
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+            Err(e) => return Err(e.into()),
+        }
         child.wait()?;
         return Ok(stopped);
     }
 }
 
-/// The last HIDDEN_TEST_TAIL_LINES lines of a hidden test's output text; when it did not pass, the last of them
-/// names the tests that failed, from cargo test's `test NAME ... FAILED` lines, or says that none failed, as when the
-/// tests did not build.
-pub fn test_output(text: &str, passed: bool) -> String {
+/// Whether a hidden test's trial passed, given text, the output of `cargo test` in the clone, and whether cargo
+/// succeeded: it passed when cargo did and its `Running` lines show tests/hidden_test.rs ran, which a Cargo.toml the
+/// agents changed could keep from being built (`autotests = false`, a `[[test]]` of that name elsewhere). With it, the
+/// last HIDDEN_TEST_TAIL_LINES lines of text; when the trial did not pass, the last of them names the tests that
+/// failed, each as TARGET::NAME, from cargo test's `Running` and `test NAME ... FAILED` lines (TARGET is `hidden_test`
+/// for the hidden test, a file's stem for the crate's own: `lib`, `main`, `duration`), or says why none did.
+pub fn judge(text: &str, cargo_passed: bool) -> (bool, String) {
     let mut lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
+    let mut target = "";
+    let mut ran_hidden_test = false;
+    let mut failed: Vec<String> = vec![];
+    for line in &lines {
+        // `     Running tests/duration.rs (target/...)`, `     Running unittests src/lib.rs (target/...)`
+        if let Some(running) = line.trim_start().strip_prefix("Running ") {
+            let path = running.trim_start_matches("unittests ").split(" (").next().unwrap_or(running);
+            ran_hidden_test |= path == "tests/hidden_test.rs";
+            target = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or(path);
+        } else if let Some(name) = line.strip_prefix("test ").and_then(|rest| rest.strip_suffix(" ... FAILED")) {
+            failed.push(format!("{target}::{name}"));
+        }
+    }
+    let passed = cargo_passed && ran_hidden_test;
     let verdict;
     if !passed {
-        let failed: Vec<&str> =
-            lines.iter().filter_map(|line| line.strip_prefix("test ")?.strip_suffix(" ... FAILED")).collect();
         verdict = match failed.as_slice() {
+            [] if cargo_passed => "not accepted: tests/hidden_test.rs did not run; Cargo.toml keeps it out".to_string(),
             [] => "not accepted: no test failed, so the tests did not build or cargo test failed".to_string(),
             names => format!("not accepted: {}", names.join(", ")),
         };
         lines.push(&verdict);
     }
-    lines[lines.len().saturating_sub(HIDDEN_TEST_TAIL_LINES)..].join("\n")
+    (passed, lines[lines.len().saturating_sub(HIDDEN_TEST_TAIL_LINES)..].join("\n"))
 }
 
 /// What a run in a clone tells a Trial, each None that a missing or unreadable directory or file leaves unknown.
@@ -726,6 +766,9 @@ pub struct Args {
     pub run_args: Vec<String>,
 }
 
+/// The runner's own flags but --help, which parse_args takes by any start of one; no two begin alike.
+const RUNNER_FLAGS: [&str; 4] = ["--tasks", "--repeat", "--config", "--keep"];
+
 /// The runner's arguments; RUN_ARGS, those after the first `--`, as run_args. Errors: a usage error, as its message.
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let (own, run_args) = match argv.iter().position(|arg| arg == "--") {
@@ -735,9 +778,13 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = Args { tasks: None, repeat: 1, config: None, keep: false, run_args };
     let mut own = own.iter();
     while let Some(arg) = own.next() {
-        let (flag, inline) = match arg.split_once('=') {
+        let (given, inline) = match arg.split_once('=') {
             Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
             _ => (arg.as_str(), None),
+        };
+        // As argparse takes them: a flag or any start of one, which no two of RUNNER_FLAGS share.
+        let Some(&flag) = RUNNER_FLAGS.iter().find(|flag| given.len() > 2 && flag.starts_with(given)) else {
+            return Err(format!("unrecognized argument: {arg}"));
         };
         let mut value = || inline.clone().or_else(|| own.next().cloned()).ok_or(format!("{flag} takes a value"));
         match flag {
@@ -817,16 +864,30 @@ pub fn run(argv: &[String], checkout: &Path, eval_engine: Option<&str>, out: &mu
         Err(Halt::Interrupted) => EXIT_INTERRUPTED,
     };
     if !trials.is_empty() {
-        let shown = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| results_path.strip_prefix(cwd).ok().map(Path::to_path_buf))
-            .unwrap_or_else(|| results_path.clone());
+        let shown = std::env::current_dir().map_or_else(|_| results_path.clone(), |cwd| relative(&results_path, &cwd));
         if let Err(e) = writeln!(out, "{}results appended to {}", table(&trials), shown.display()) {
             eprintln!("error: could not write the table: {e}");
             exit = exit.max(1);
         }
     }
     exit
+}
+
+/// path relative to dir, both absolute, with `..` for each of dir's components path does not share, as Python's
+/// os.path.relpath writes it; path itself when they share no root.
+fn relative(path: &Path, dir: &Path) -> PathBuf {
+    let (path, dir): (Vec<_>, Vec<_>) = (path.components().collect(), dir.components().collect());
+    let shared = path.iter().zip(&dir).take_while(|(a, b)| a == b).count();
+    if shared == 0 {
+        return path.iter().collect();
+    }
+    let up = std::iter::repeat_n(std::path::Component::ParentDir, dir.len() - shared);
+    let relative: PathBuf = up.chain(path[shared..].iter().copied()).collect();
+    if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
+    }
 }
 
 /// Every trial args ask for, each pushed onto trials and its line appended to results_path as it ends; stopped at
@@ -839,7 +900,9 @@ fn run_trials(
     results_path: &Path,
     trials: &mut Vec<Trial>,
 ) -> Result<(), Halt> {
-    let engine = engine_command(eval_engine, checkout)?;
+    // A build the Ctrl-C reached fails by it.
+    let engine =
+        engine_command(eval_engine, checkout).map_err(|e| if interrupted() { Halt::Interrupted } else { e.into() })?;
     let tasks = load_tasks(args.tasks.as_deref(), &tasks_dir(checkout))?;
     for task in &tasks {
         for repeat in 1..=args.repeat {
@@ -847,9 +910,11 @@ fn run_trials(
                 return Err(Halt::Interrupted);
             }
             let trial = run_trial(task, repeat, &engine, &args.run_args, args.keep)?;
-            append_records(results_path, &[evaluation.record(&trial)])
-                .map_err(|e| Error(format!("could not append to {}: {e}", results_path.display())))?;
+            let record = evaluation.record(&trial);
+            // In the table even when its line cannot be kept.
             trials.push(trial);
+            append_records(results_path, &[record])
+                .map_err(|e| Error(format!("could not append to {}: {e}", results_path.display())))?;
         }
     }
     Ok(())

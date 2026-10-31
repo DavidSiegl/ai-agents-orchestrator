@@ -1,8 +1,8 @@
 //! The xtask binary as `cargo xtask` runs it: its commands' usage errors, the bundles it writes, and a Ctrl-C during
 //! an eval.
 
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -35,25 +35,32 @@ fn written_bundles_pass_the_check() {
 
 #[test]
 fn a_ctrl_c_waits_for_the_engine_keeps_the_clone_and_exits_130() {
-    // An engine that outlives the Ctrl-C, which reaches only the runner here, not a terminal's whole group.
-    let child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    // An engine that says it started, on the runner's standard error, and outlives the Ctrl-C, which reaches only the
+    // runner here, not a terminal's whole group.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(["eval", "--tasks", "feature"])
-        .env("EVAL_ENGINE", "sh -c 'sleep 3'")
+        .env("EVAL_ENGINE", "sh -c 'echo engine started >&2; sleep 2'")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("xtask runs");
-    std::thread::sleep(Duration::from_millis(1000));
+    let mut stderr = BufReader::new(child.stderr.take().expect("its stderr is piped"));
+    let mut seen = String::new();
+    while !seen.contains("engine started") {
+        let mut line = String::new();
+        assert_ne!(stderr.read_line(&mut line).expect("stderr reads"), 0, "xtask ended first: {seen}");
+        seen.push_str(&line);
+    }
     kill(Pid::from_raw(i32::try_from(child.id()).expect("a pid")), Signal::SIGINT).expect("SIGINT is sent");
+    stderr.read_to_string(&mut seen).expect("stderr reads");
     let output = child.wait_with_output().expect("xtask is waited for");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let kept = stderr.lines().find_map(|line| line.strip_prefix("interrupted: the run's clone stays in "));
+    let kept = seen.lines().find_map(|line| line.strip_prefix("interrupted: the run's clone stays in "));
     let repo = kept.map(std::path::Path::new);
     let exists = repo.is_some_and(|repo| repo.join(".git").is_dir());
     if let Some(work) = repo.and_then(|repo| repo.parent()) {
         std::fs::remove_dir_all(work).expect("the kept directory is removed");
     }
-    assert_eq!(output.status.code(), Some(130), "{stderr}");
-    assert!(exists, "{stderr}");
+    assert_eq!(output.status.code(), Some(130), "{seen}");
+    assert!(exists, "{seen}");
     assert!(output.stdout.is_empty(), "no trial ended, so no table: {}", String::from_utf8_lossy(&output.stdout));
 }

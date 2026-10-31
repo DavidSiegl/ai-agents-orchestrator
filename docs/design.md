@@ -169,9 +169,10 @@ The tasks, each a toy Rust crate with no dependency and its own tests, of a diff
 | `no-dependency` | an aligned table, without a dependency | the table, and no dependency in Cargo.toml or Cargo.lock |
 
 The runner copies a task's `hidden_test.rs` into the clone's `tests/` after the run and runs `cargo test --no-fail-fast`
-there, so the crate's own tests run beside it, with the build in the trial's directory. The hidden tests are out of the
-agents' sight, not out of their reach: the clone, its origin and the spec are copies in a temporary directory, but an
-agent free to search the machine could find this checkout.
+there, so the crate's own tests run beside it, with the build in the trial's directory; a trial whose `cargo test` did
+not run `tests/hidden_test.rs`, as a Cargo.toml with `autotests = false` would not, fails. The hidden
+tests are out of the agents' sight, not out of their reach: the clone, its origin and the spec are copies in a temporary
+directory, but an agent free to search the machine could find this checkout.
 
 **What the numbers mean.** The runner prints a row per task and one for all of them, and appends a JSON line per
 trial to `evals/results/<date>-<config>.jsonl`, where config is `--config` or the arguments after `--` (`default`
