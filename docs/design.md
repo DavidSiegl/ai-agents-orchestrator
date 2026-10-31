@@ -142,11 +142,11 @@ trial is a real run, which spends tokens and needs a herdr pane.
 
 ```sh
 # Every task once, with the default workflow and harness
-uv run python evals/run.py
+cargo xtask eval
 # Three runs of two tasks, with run's flags after --
-uv run python evals/run.py --tasks feature,bugfix --repeat 3 -- --workflow quick --model sonnet
-# The Rust engine, or any other program that takes run's and close's arguments
-EVAL_ENGINE=target/release/octoflow uv run python evals/run.py --tasks docs
+cargo xtask eval --tasks feature,bugfix --repeat 3 -- --workflow quick --model sonnet
+# A release's binary, or any other program that takes run's and close's arguments
+EVAL_ENGINE=target/release/octoflow cargo xtask eval --tasks docs
 ```
 
 For each task and repeat, the runner clones the task's bundle into a directory of its own, runs the engine there
@@ -154,21 +154,24 @@ as `run --no-pr --spec`, with a copy of the task's text as the spec, then runs t
 and closes the run's workspace with `close`. The arguments after `--` go to `run` unchanged; the runner refuses
 the flags it sets itself and those that would put the change elsewhere. A workflow whose first step writes the
 spec, such as `default` or `product-team`, starts at the step after it, so no interview waits for an answer.
-`evals/run.py`'s docstring gives its flags, the shape of a task and its exit status.
+`xtask/src/eval.rs`'s module comment gives its flags, the shape of a task and its exit status. A Ctrl-C stops the
+eval once the engine has saved its run, keeps that trial's clone, prints the table of the trials before it and exits
+130.
 
-The tasks, each a toy Python package with its own unittest tests, of a different shape:
+The tasks, each a toy Rust crate with no dependency and its own tests, of a different shape:
 
 | Task | Asks for | Its hidden test checks |
 |---|---|---|
 | `feature` | a function and a command-line flag | their behaviour, usage errors included, and that a test names the function |
 | `bugfix` | a fix, given a reproducer | durations of several units, what is still rejected, and a regression test |
 | `refactor` | one home for duplicated rounding and formatting | output unchanged against the starting code, and the rounding written once |
-| `docs` | a README usage section and docstrings | each command shown, and the code unchanged but for docstrings |
-| `no-dependency` | an aligned table, without a dependency | the table, and no dependency declared or imported |
+| `docs` | a README usage section and doc comments | each command shown, and the code unchanged but for comments |
+| `no-dependency` | an aligned table, without a dependency | the table, and no dependency in Cargo.toml or Cargo.lock |
 
-Every hidden test also runs the package's own tests. The hidden tests are out of the agents' sight, not out of their
-reach: the clone, its origin and the spec are copies in a temporary directory, but an agent free to search the
-machine could find this checkout.
+The runner copies a task's `hidden_test.rs` into the clone's `tests/` after the run and runs `cargo test --no-fail-fast`
+there, so the crate's own tests run beside it, with the build in the trial's directory. The hidden tests are out of the
+agents' sight, not out of their reach: the clone, its origin and the spec are copies in a temporary directory, but an
+agent free to search the machine could find this checkout.
 
 **What the numbers mean.** The runner prints a row per task and one for all of them, and appends a JSON line per
 trial to `evals/results/<date>-<config>.jsonl`, where config is `--config` or the arguments after `--` (`default`
@@ -187,27 +190,29 @@ run that failed or was interrupted has no `metrics.json`, so it adds to `passed`
 and a few repeats are a small sample: one trial more or less passed is noise, a shift across tasks and repeats is
 not. Compare results of the same tasks only; a line's `commit`, this checkout's HEAD, says which.
 
-A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `target/debug/orchestrator`),
-`commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run), `seconds`,
-`hidden_test_output` (the last lines of its output, ending with the checks that did not pass), `run_id`, and from
-`metrics.json`, `null` without one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed,
-`null` also when a turn's are unknown. Evals of one configuration on one day share a file, told apart by `commit`,
-which ends in `-dirty` when a tracked file differed from it. `jq` sums a file up by commit and task:
+A result line holds `version` (2 since the tasks became Rust crates, whose numbers start a new series on 2026-10-31; 1
+for the Python tasks before), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `this checkout's build`),
+`commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run, minus the signal's number when
+one ended it), `seconds`, `hidden_test_output` (the last lines of `cargo test`'s output, ending, when it did not accept,
+with the tests that failed), `run_id`, and from `metrics.json`, `null` without one: `outcome`, `rounds`,
+`quality_rounds`, and `tokens`, the four counts summed, `null` also when a turn's are unknown. Evals of one
+configuration on one day share a file, told apart by `commit`, which ends in `-dirty` when a tracked file differed from
+it. `jq` sums a file up by commit and task:
 
 ```sh
 jq -c -s 'group_by([.commit, .task]) | map({commit: .[0].commit[:12], task: .[0].task,
                                              passed: (map(select(.passed)) | length), runs: length})' \
-    evals/results/2026-10-28-default.jsonl
+    evals/results/2026-10-31-default.jsonl
 ```
 
-**Changing a task.** A toy repository is source in `evals/make_bundles.py`; `uv run python evals/make_bundles.py`
-rebuilds the bundles, and its `--check` fails when one is not of the source. `tests/test_evals.py` runs that check,
-and runs each hidden test on its task's starting point, which it must reject, and on a solution of it, which it must
-accept. A task changed since a result line was written makes that line incomparable with newer ones.
+**Changing a task.** A toy repository is source in `xtask/src/toy_repos.rs`, as text, so that neither Cargo nor the
+quality gate takes it for this repository's code; `cargo xtask bundles` rebuilds the bundles, and its `--check` fails
+when one is not of the source. xtask's tests (`cargo nextest run -p xtask`) run that check, and run each hidden test on
+its task's starting point, which it must reject, and on a solution of it, which it must accept. A task changed since a
+result line was written makes that line incomparable with newer ones.
 
-The runner is a script of its own that runs the engine as a program, not a command of the engine: it was written
-while the Python engine was frozen and the Rust one replacing it, so that it judged either, and it judges whichever
-binary `EVAL_ENGINE` names, a release's too.
+The runner is a chore of the repository's, `cargo xtask eval`, that runs the engine as a program, not a command of the
+engine, so that it judges whichever binary `EVAL_ENGINE` names, a release's too.
 
 ## Provenance trailers
 

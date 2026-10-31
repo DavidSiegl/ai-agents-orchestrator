@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+description = "The repository's chores in Rust, run as `cargo xtask <command>`: the eval set's runner and its bundles"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+default-run = "xtask"
+
+# Crates the workspace has already, at the engine's versions and features; xtask adds none to Cargo.lock.
+[dependencies]
+# The day an eval started, in the machine's local time, which names its results file (eval::Eval).
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# Ctrl-C during an eval: the runner blocks SIGINT and waits for it on a thread, and unblocks it in each command it
+# starts (process.rs), so that the engine saves its run and the runner still prints its table.
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+# cargo's build messages, a run's metrics.json, the eval's result lines and the fake engine's plan and log.
+serde_json = "1"
+
+# A stand-in for the engine, for tests/eval.rs: a binary of this package, so that its tests find it by
+# CARGO_BIN_EXE_fake-engine, which Cargo sets only for a test's own package.
+[[bin]]
+name = "fake-engine"
+path = "src/bin/fake-engine.rs"
+
+[lints]
+workspace = true

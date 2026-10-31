@@ -333,10 +333,10 @@ and a fresh session's prompt put together, only the golden files hold. The engin
 other texts, its follow-up prompts, notes, commit messages and pull request bodies, have no golden files: the
 scenarios record them as sent, where one reaches them. TODO.md lists the texts neither reaches.
 
-`tests/test_evals.py` covers the eval runner, `evals/run.py` ([Evals](design.md#evals)), with
-`tests/fake_engine.py` as its engine, a program that plays a scripted run in the clone, and the eval tasks: each
-bundle is of its source, and each hidden test rejects its task's starting point and accepts a solution of it. No
-agent runs in the suite.
+xtask's tests (`xtask/tests/`) cover the eval runner, `cargo xtask eval` ([Evals](design.md#evals)), with the
+`fake-engine` binary as its engine, a program that plays a scripted run in the clone, and the eval tasks: each bundle
+is of its source, and each hidden test rejects its task's starting point and accepts a solution of it. No agent runs
+in the suite.
 
 ## Tooling
 
@@ -346,9 +346,10 @@ agent runs in the suite.
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
   Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's tests under cargo-llvm-cov.
 - `Cargo.toml`: the Cargo workspace, whose members are the engine (`engine/`, `octoflow-engine`, whose version is
-  `pyproject.toml`'s) and
-  the desktop shell (`ui/src-tauri/`), with one `Cargo.lock`, the lints every member takes (`[workspace.lints]`), and
-  `rust-toolchain.toml`, the toolchain and components the Jenkins agent's image has.
+  `pyproject.toml`'s), its e2e scenarios (`engine/e2e/`), the desktop shell (`ui/src-tauri/`) and the repository's
+  chores (`xtask/`, run as `cargo xtask <command>` through `.cargo/config.toml`'s alias: `eval`, the eval set's runner,
+  and `bundles`, which builds its tasks' bundles), with one `Cargo.lock`, the lints every member takes
+  (`[workspace.lints]`), and `rust-toolchain.toml`, the toolchain and components the Jenkins agent's image has.
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes

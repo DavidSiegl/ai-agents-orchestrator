@@ -1,0 +1,3 @@
+# `cargo xtask <command>` runs the repository's chores in Rust (xtask/), the Cargo convention for project scripts.
+[alias]
+xtask = "run -p xtask --"

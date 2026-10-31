@@ -454,7 +454,7 @@ change is reviewed as their diff (see [Tests](docs/architecture.md#tests)). `pac
 smoke-tests the binary for the machine it runs on; see [Tooling](docs/architecture.md#tooling).
 
 Before a release that changes a prompt, a workflow or how a harness is run, run the eval set by hand, from a herdr
-pane: `uv run python evals/run.py` gives real agents five small tasks and judges each by a test they never see
+pane: `cargo xtask eval` gives real agents five small tasks and judges each by a test they never see
 ([Evals](docs/design.md#evals)).
 
 ## License

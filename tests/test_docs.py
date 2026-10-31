@@ -48,7 +48,7 @@ OTHER_PROGRAMS_NAMES = {
     "ORCHESTRATOR_BIN": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
     "E2E_ENGINE": "the e2e scenarios' environment variable, engine/e2e/tests/e2e/engine.rs",
     "E2E_RECORD": "the e2e scenarios' environment variable, engine/e2e/tests/e2e/main.rs",
-    "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",
+    "EVAL_ENGINE": "the eval runner's environment variable, xtask/src/eval.rs",
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
     "HARNESSES": "the Rust engine's table of the agent harnesses, engine/src/harness.rs",
