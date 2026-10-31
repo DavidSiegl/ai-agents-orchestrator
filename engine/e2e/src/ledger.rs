@@ -151,8 +151,9 @@ pub fn write_atomically(path: &Path, text: &str) {
 ///
 /// A run counts only while engine_pids holds its owner's pid, or it has no owner: another engine process that talks
 /// to the world meanwhile, as a taken-over run's old orchestrator does, sees state.json change at times only the
-/// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone. Panics, naming the path,
-/// when runs/ or a state.json is there but cannot be read, as `_changed_states` in tests/parity/fakes.py raises.
+/// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone. A run with no state
+/// yet is passed over (run_state). Panics, naming the path, where `_changed_states` in tests/parity/fakes.py raises:
+/// when runs/ is there but cannot be listed, at a state run_state refuses, and at an owner that is no object.
 fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<i32>) -> Vec<Json> {
     let runs = crate::runs_dir(project);
     let mut names: Vec<String> = match fs::read_dir(&runs) {
@@ -170,6 +171,7 @@ fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<
         let path = runs.join(&name).join("state.json");
         let Some((text, mut saved)) = run_state(&path) else { continue };
         if let Some(owner) = saved.get("owner").filter(|o| o.truthy()) {
+            let Json::Object(owner) = owner else { panic!("{}: an owner that is no object", path.display()) };
             let pid = owner.get("pid").and_then(Json::as_int);
             if !pid.is_some_and(|pid| engine_pids.iter().any(|&p| i128::from(p) == pid)) {
                 continue;
@@ -186,23 +188,21 @@ fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<
     changed
 }
 
-/// The text of the run state at path and the object it holds; None when there is no run state there yet: no file
-/// (an entry of runs/ that is no directory, or a run directory the engine has not saved in, which the engine's
-/// Host::run_states skips too), or text that is no JSON object (a state being written). Panics, naming path, when a
-/// file is there but cannot be read.
+/// The text of the run state at path and the object it holds; None where `_changed_states` in
+/// tests/parity/fakes.py catches FileNotFoundError or ValueError: no state.json yet, in a run directory the engine has
+/// not saved in, or text that is not UTF-8 or not JSON. Panics, naming path, where Python raises: any other failure to
+/// read it (a state.json that is a directory, an entry of runs/ that is a file), and JSON that is no object.
 fn run_state(path: &Path) -> Option<(String, Map<Json>)> {
-    if !path.is_file() {
-        return None;
-    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        // Removed since is_file looked.
-        Err(e) if e.kind() == ErrorKind::NotFound => return None,
+        // InvalidData: not UTF-8, which Python's read raises as UnicodeDecodeError, a ValueError.
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::InvalidData) => return None,
         Err(e) => panic!("reading {}: {e}", path.display()),
     };
     match Json::parse(&text) {
         Ok(Json::Object(saved)) => Some((text, saved)),
-        _ => None,
+        Ok(other) => panic!("{} holds no JSON object: {}", path.display(), other.dumps()),
+        Err(_) => None,
     }
 }
 
@@ -294,11 +294,9 @@ mod tests {
 
     #[test]
     fn what_is_no_run_state_yet_is_neither_logged_nor_remembered() {
-        let project = Project::new("unsaved", &[("a", None), ("b", Some(r#"{"phase": "sp"#)), ("c", Some("[1]"))]);
-        let stray = project.runs().join(".DS_Store");
-        fs::write(&stray, "").unwrap_or_else(|e| panic!("writing {}: {e}", stray.display()));
-        let dir_state = project.runs().join("d").join("state.json");
-        fs::create_dir_all(&dir_state).unwrap_or_else(|e| panic!("making {}: {e}", dir_state.display()));
+        let project = Project::new("unsaved", &[("a", None), ("b", Some(r#"{"phase": "sp"#)), ("c", Some("{}"))]);
+        let c = project.state_path("c");
+        fs::write(&c, [b'{', 0xff, b'}']).unwrap_or_else(|e| panic!("writing {c}: {e}"));
         let mut state = Map::new();
         assert!(project.changed(&mut state, &[]).is_empty());
         assert_eq!(state.get("last_states").map(Json::dumps).as_deref(), Some("{}"));
@@ -320,13 +318,36 @@ mod tests {
         assert_eq!(project.changed(&mut Map::new(), &[7]), ["a", "c", "d"].map(|run| project.state_path(run)));
     }
 
-    #[test]
-    fn a_state_that_cannot_be_read_fails() {
-        let project = Project::new("unreadable", &[("a", Some("{}"))]);
-        let a = project.state_path("a");
-        fs::write(&a, [0xff]).unwrap_or_else(|e| panic!("writing {a}: {e}"));
+    /// The message changed_states panics with in project, as Python's _changed_states raises there.
+    fn failure(project: &Project) -> String {
         let failure = std::panic::catch_unwind(|| project.changed(&mut Map::new(), &[])).expect_err("a panic");
-        let message = failure.downcast_ref::<String>().map_or("", String::as_str);
+        failure.downcast_ref::<String>().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_state_json_that_is_a_directory_fails() {
+        let project = Project::new("state-dir", &[("a", None)]);
+        let a = project.state_path("a");
+        fs::create_dir(&a).unwrap_or_else(|e| panic!("making {a}: {e}"));
+        let message = failure(&project);
         assert!(message.starts_with(&format!("reading {a}: ")), "{message}");
+    }
+
+    #[test]
+    fn an_entry_of_runs_that_is_a_file_fails() {
+        let project = Project::new("runs-file", &[]);
+        let stray = project.runs().join("stray");
+        fs::create_dir_all(project.runs()).unwrap_or_else(|e| panic!("making the runs: {e}"));
+        fs::write(&stray, "").unwrap_or_else(|e| panic!("writing {}: {e}", stray.display()));
+        let message = failure(&project);
+        assert!(message.starts_with(&format!("reading {}: ", project.state_path("stray"))), "{message}");
+    }
+
+    #[test]
+    fn a_state_or_an_owner_that_is_no_object_fails() {
+        let project = Project::new("no-object", &[("a", Some("[1]"))]);
+        assert!(failure(&project).ends_with("holds no JSON object: [1]"));
+        project.write("a", r#"{"owner": 5}"#);
+        assert!(failure(&project).ends_with("an owner that is no object"));
     }
 }
