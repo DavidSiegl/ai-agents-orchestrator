@@ -492,4 +492,67 @@ mod tests {
         let got = facts("run <run:1> failed: VERDICT_X in src/calc.py (see https://x.example/a), exit 3; build_path ok.");
         assert_eq!(got, ["3", "<run:1>", "VERDICT_X", "build_path", "https://x.example/a", "src/calc.py"]);
     }
+
+    /// What tests/parity/normalize.py gave for the inputs of tests/parity/normalize_oracle.py, which made it.
+    fn oracle() -> Json {
+        Json::parse(include_str!("normalize/oracle.json")).expect("oracle.json is JSON")
+    }
+
+    /// The normalizer normalize_oracle.py makes: two literals, one inside the other; three pids, the first registered
+    /// twice; and the oracle's record learnt.
+    fn oracle_normalizer(oracle: &Json) -> Normalizer {
+        let mut n = Normalizer::new();
+        n.literal("/w/orld", "<world>");
+        n.literal("/w", "<short>");
+        n.pid(4242, 1);
+        n.pid(77, 2);
+        n.pid(4242, 3);
+        n.learn(&oracle_items(oracle, "json")[0]);
+        n
+    }
+
+    fn oracle_items<'a>(oracle: &'a Json, key: &str) -> &'a [Json] {
+        oracle.get(key).and_then(Json::as_array).unwrap_or_else(|| panic!("oracle.json has no {key} list"))
+    }
+
+    fn oracle_str(item: &Json, i: usize) -> &str {
+        let found = item.as_array().and_then(|a| a.get(i)).and_then(Json::as_str);
+        found.unwrap_or_else(|| panic!("no string {i} in {}", item.dumps()))
+    }
+
+    #[test]
+    fn text_writes_placeholders_as_python_did() {
+        let oracle = oracle();
+        let n = oracle_normalizer(&oracle);
+        for case in oracle_items(&oracle, "texts") {
+            let text = oracle_str(case, 0);
+            assert_eq!(n.text(text, false), oracle_str(case, 1), "{text}");
+            assert_eq!(n.text(text, true), oracle_str(case, 2), "{text}, timed");
+        }
+    }
+
+    #[test]
+    fn json_replaces_timed_numbers_and_pids_as_python_did() {
+        let oracle = oracle();
+        let n = oracle_normalizer(&oracle);
+        let json_in = oracle.get("json_in").expect("oracle.json has json_in");
+        let want = oracle_items(&oracle, "json");
+        assert_eq!(n.json(json_in, false, None).dumps(), want[1].dumps());
+        assert_eq!(n.json(&Json::parse(r#"{"a": "5s"}"#).expect("JSON"), true, None).dumps(), want[2].dumps());
+    }
+
+    #[test]
+    fn facts_are_found_as_python_found_them() {
+        for case in oracle_items(&oracle(), "facts") {
+            let want = case.as_array().and_then(|a| a.get(1)).and_then(Json::as_array).expect("a list of facts");
+            let want: Vec<&str> = want.iter().map(|f| f.as_str().expect("a fact")).collect();
+            assert_eq!(facts(oracle_str(case, 0)), want);
+        }
+    }
+
+    #[test]
+    fn the_host_is_a_placeholder() {
+        let host = nix::unistd::gethostname().expect("the host's name").to_string_lossy().into_owned();
+        assert_eq!(Normalizer::new().text(&format!("on {host}."), false), "on <host>.");
+    }
 }

@@ -1,0 +1,113 @@
+{
+ "texts": [
+  [
+   "run 20260101-120000-abc123 in /w/orld/project and /w/x, key abc123, xabc123 abc123g",
+   "run <run:1> in <world>/project and <short>/x, key <key:1>, x<key:1> <key:1>g",
+   "run <run:1> in <world>/project and <short>/x, key <key:1>, x<key:1> <key:1>g"
+  ],
+  [
+   "commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1 aaaaaaa aaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 01234567 00000000000000000000000000000000000000000",
+   "commit <sha:1> <sha:1> <sha:1> <sha:?> <sha:2> <sha:2> 00000000000000000000000000000000000000000",
+   "commit <sha:1> <sha:1> <sha:1> <sha:?> <sha:2> <sha:2> 00000000000000000000000000000000000000000"
+  ],
+  [
+   "at 2026-01-02T03:04:05Z and 2026-01-02 03:04:05.123+01:00 and 2026-01-02T03:04:05+0100 and 2026-01-02T03:04:05+01:0 and x2026-01-02T03:04:05",
+   "at <time> and <time> and <time> and <time>+01:0 and x2026-01-02T03:04:05",
+   "at <time> and <time> and <time> and <time>+01:0 and x2026-01-02T03:04:05"
+  ],
+  [
+   "{\"seconds\": 12, \"mtime\": 3.5, \"heartbeat_age\": 7, \"pid\": 4242, \"pid\": 99}",
+   "{\"seconds\": \"<seconds>\", \"mtime\": \"<seconds>\".5, \"heartbeat_age\": \"<seconds>\", \"pid\": \"<pid:3>\", \"pid\": \"<pid:?>\"}",
+   "{\"seconds\": \"<seconds>\", \"mtime\": \"<seconds>\".5, \"heartbeat_age\": \"<seconds>\", \"pid\": \"<pid:3>\", \"pid\": \"<pid:?>\"}"
+  ],
+  [
+   "pid 4242 and 77 and 424242 and a77",
+   "pid <pid:3> and <pid:2> and 424242 and a77",
+   "pid <pid:3> and <pid:2> and 424242 and a77"
+  ],
+  [
+   "took 5s, 2m 05s, 1h 02m, 2m, 1h2m, 12m 5s, 3h 120m, 7ms, x5s, 5s1",
+   "took 5s, 2m 05s, 1h 02m, 2m, 1h2m, 12m 5s, 3h 120m, 7ms, x5s, 5s1",
+   "took <duration>, <duration>, <duration>, <duration>, 1h2m, <duration> <duration>, 3h <duration>, 7ms, x5s, 5s1"
+  ]
+ ],
+ "json": [
+  {
+   "x": [
+    "run 20260101-120000-abc123 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+    {
+     "y": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef and 20260102-000000-0f0f0f"
+    },
+    "\n20260103-000000-111111"
+   ]
+  },
+  {
+   "pid": "<pid:3>",
+   "seconds": "<seconds>",
+   "health_reason": "beat <duration> ago",
+   "list": [
+    77,
+    true,
+    "<run:1>"
+   ],
+   "other": 5,
+   "pid2": {
+    "pid": "<pid:?>"
+   }
+  },
+  {
+   "a": "<duration>"
+  }
+ ],
+ "json_in": {
+  "pid": 4242,
+  "seconds": 3,
+  "health_reason": "beat 3s ago",
+  "list": [
+   77,
+   true,
+   "20260101-120000-abc123"
+  ],
+  "other": 5,
+  "pid2": {
+   "pid": 1
+  }
+ },
+ "facts": [
+  [
+   "<run:1> failed: see https://x.org/a?b=1, at /tmp/x/y and a/ or /b; VERDICT: APPROVE NO_PR AB ABC_ D_E (exit 3) foo_bar _x x_ round-2 v0.9.4 <pid:?> <x> <sha:12> <a:> é5 5é ok.",
+   [
+    "/b",
+    "/tmp/x/y",
+    "3",
+    "5é",
+    "<pid:?>",
+    "<run:1>",
+    "<sha:12>",
+    "<x>",
+    "ABC_",
+    "APPROVE",
+    "D_E",
+    "NO_PR",
+    "VERDICT",
+    "foo_bar",
+    "https://x.org/a?b=1",
+    "round-2",
+    "v0.9.4",
+    "é5"
+   ]
+  ],
+  [
+   "x1 1x a1b-c (2) -5 path/ /p //",
+   [
+    "//",
+    "/p",
+    "1x",
+    "2",
+    "5",
+    "a1b-c",
+    "x1"
+   ]
+  ]
+ ]
+}
