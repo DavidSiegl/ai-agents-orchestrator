@@ -780,13 +780,6 @@ fn find_on_path(program: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")?.to_str()?.split(':').map(|dir| Path::new(dir).join(program)).find(|p| p.is_file())
 }
 
-/// Whether process pid has ended: gone from /proc, or a zombie its parent has not reaped yet.
-#[cfg(test)]
-fn ended(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map_or(true, |stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')))
-}
-
 /// A world dropped while its engine waits on an agent kills the engine and every process below it.
 #[test]
 fn a_dropped_world_leaves_nothing_of_its_engine_running() {
@@ -798,6 +791,14 @@ fn a_dropped_world_leaves_nothing_of_its_engine_running() {
     // What is below the engine while it polls the held agent: often nothing but the engine itself.
     let engine = procs::descendants(w.invocation(n).pid()).expect("listing the engine's processes");
     drop(w);
-    let running: Vec<i32> = engine.into_iter().filter(|&p| !ended(p)).collect();
-    assert!(running.is_empty(), "still running after the drop: {running:?}");
+    // A process killed ends soon after, not at once: the drop waits for the engine alone.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let running = || -> Vec<i32> {
+        engine.iter().copied().filter(|&p| !procs::ended(p).expect("reading a process's stat")).collect()
+    };
+    while !running().is_empty() && Instant::now() < deadline {
+        sleep(WAIT_POLL);
+    }
+    let left = running();
+    assert!(left.is_empty(), "still running 5 s after the drop: {left:?}");
 }

@@ -4,11 +4,27 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+/// The fields of /proc/<pid>/stat after the command name, from the state on; None when pid has ended, its stat file
+/// gone. Errors: a stat that cannot be read for another reason.
+fn stat_fields(pid: i32) -> std::io::Result<Option<Vec<String>>> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // The command name, field 2, is in parentheses and may hold spaces and parentheses itself.
+    Ok(stat.rsplit_once(')').map(|(_, rest)| rest.split_whitespace().map(str::to_string).collect()))
+}
+
 /// The parent of process pid, from /proc/<pid>/stat; None when pid has ended or its stat cannot be read.
 pub fn parent(pid: i32) -> Option<i32> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name, field 2, is in parentheses and may hold spaces; the parent is the second field after it.
-    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+    stat_fields(pid).ok()??.get(1)?.parse().ok()
+}
+
+/// Whether process pid has ended: gone from /proc, or a zombie its parent has not reaped yet. Errors: a stat that
+/// cannot be read but for its being gone, such as one /proc's hidepid hides.
+pub fn ended(pid: i32) -> std::io::Result<bool> {
+    Ok(stat_fields(pid)?.is_none_or(|fields| fields.first().map(String::as_str) == Some("Z")))
 }
 
 /// The pids of this process's ancestors, its parent first, up to but not including init.
@@ -41,4 +57,33 @@ pub fn descendants(pid: i32) -> std::io::Result<BTreeSet<i32>> {
         }
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_process_has_not_ended_and_a_reaped_one_has() {
+        let me = i32::try_from(std::process::id()).expect("a pid fits an i32");
+        assert!(!ended(me).expect("reading this process's stat"));
+        let mut child = std::process::Command::new("true").spawn().expect("starting true");
+        let pid = i32::try_from(child.id()).expect("a pid fits an i32");
+        child.wait().expect("waiting for true");
+        assert!(ended(pid).expect("reading a reaped process's stat"));
+        assert_eq!(parent(me), i32::try_from(std::os::unix::process::parent_id()).ok());
+    }
+
+    #[test]
+    fn a_zombie_has_ended() {
+        let child = std::process::Command::new("true").spawn().expect("starting true");
+        let pid = i32::try_from(child.id()).expect("a pid fits an i32");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ended(pid).expect("reading the child's stat") {
+            assert!(std::time::Instant::now() < deadline, "true still runs after 5 s");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(stat_fields(pid).expect("reading the zombie's stat").is_some(), "the unreaped child is gone");
+        drop(child);
+    }
 }
