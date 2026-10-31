@@ -74,6 +74,16 @@ pipeline {
             }
         }
 
+        // A pull request into main must raise the release version over main's: the Release stage releases a merge into
+        // main only when its version has no release yet, so a merge that kept it would go unreleased
+        // (ci/version-raised.sh).
+        stage('Version') {
+            when { changeRequest target: 'main' }
+            steps {
+                sh 'ci/version-raised.sh'
+            }
+        }
+
         // A build of main skips Test and Gate when a pull request build already judged its tree
         // (ci/judged-at-pr.sh). Whatever stops the script from saying so, the build judges the tree itself.
         stage('Judged at PR') {
