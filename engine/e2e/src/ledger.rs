@@ -154,7 +154,7 @@ pub fn write_atomically(path: &Path, text: &str) {
 /// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone. Panics, naming the path,
 /// when runs/ or a state.json is there but cannot be read, as `_changed_states` in tests/parity/fakes.py raises.
 fn changed_states(state: &mut Map<Json>, project: &Path, engine_pids: &BTreeSet<i32>) -> Vec<Json> {
-    let runs = project.join(".orchestrator").join("runs");
+    let runs = crate::runs_dir(project);
     let mut names: Vec<String> = match fs::read_dir(&runs) {
         Ok(entries) => entries
             .map(|e| e.unwrap_or_else(|e| panic!("listing {}: {e}", runs.display())))
@@ -249,7 +249,7 @@ mod tests {
         }
 
         fn runs(&self) -> PathBuf {
-            self.0.path().join(".orchestrator").join("runs")
+            crate::runs_dir(self.0.path())
         }
 
         fn state_path(&self, run: &str) -> String {

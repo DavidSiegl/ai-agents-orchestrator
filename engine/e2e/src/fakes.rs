@@ -23,7 +23,7 @@ use std::process::Command;
 use octoflow_engine::py::json::{Json, Map};
 
 use crate::ledger::{invocation, wait_until, Ledger};
-use crate::{array_at, holds, object, object_at, str_at, strings};
+use crate::{array_at, holds, object, object_at, run_dir, str_at, strings};
 
 /// The URL of pull request n as gh prints it once it has opened it.
 fn pr_url(n: i128) -> String {
@@ -354,21 +354,6 @@ fn perform(ledger: &Ledger, state: &mut Map<Json>, name: &str, action: &Json) {
     mark_agent(state, name, action.get("status").cloned().unwrap_or(Json::from("idle")));
     if action.get("exit").is_some_and(Json::truthy) {
         object_at(state, "agents").remove(name);
-    }
-}
-
-/// The run directory of the run whose key is key.
-fn run_dir(project: &Path, key: &str) -> std::path::PathBuf {
-    let runs = project.join(".orchestrator").join("runs");
-    let entries = fs::read_dir(&runs).unwrap_or_else(|e| panic!("listing {}: {e}", runs.display()));
-    let found: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.ends_with(&format!("-{key}")))
-        .collect();
-    match found.as_slice() {
-        [one] => runs.join(one),
-        _ => panic!("no single run directory for key {key} in {}: {found:?}", runs.display()),
     }
 }
 

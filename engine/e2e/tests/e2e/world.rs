@@ -421,15 +421,7 @@ impl World {
 
     /// The saved state of the run with that key, as state.json holds it now.
     pub fn run_state(&self, key: &str) -> Json {
-        let runs = self.project.join(".orchestrator").join("runs");
-        let entries = fs::read_dir(&runs).unwrap_or_else(|e| panic!("listing {}: {e}", runs.display()));
-        let names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.ends_with(&format!("-{key}")))
-            .collect();
-        let [name] = names.as_slice() else { panic!("no single run directory for {key}: {names:?}") };
-        let path = runs.join(name).join("state.json");
+        let path = octoflow_e2e::run_dir(&self.project, key).join("state.json");
         Json::parse(&read_lossy(&path)).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
