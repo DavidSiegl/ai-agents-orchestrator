@@ -35,7 +35,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   since records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret
   gitleaks finds, at a quality round or at publish; the harnesses other than claude and codex starting an agent (only
   their arguments differ); a session log's token counts (every turn records `unknown`); `--timeout` and the stall
-  notice, which take real minutes; round 2 of the example workflows and a fresh session's prompts as sent, whose
+  notice, which take real minutes; the GUI, which the Rust engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose
   templates only the recorded `state.json` holds and whose text only golden files hold (docs/architecture.md, Tests);
   and texts the engine sends or writes that neither a scenario nor a golden file reaches: `CONTINUE_PROMPT`,
   `QUALITY_OFF_NOTE`, the pull request body of a run that ends `FINISHED` and of one whose gate was turned off after its
@@ -106,12 +106,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (2026-10-30). Closes with the docs naming the difference as the engine's, or with attributes refused when the
   workflow file is read, as a placeholder's name is checked there (`field_names`).
 - **The Rust engine names itself `orchestrator.py`.** Its messages and hints were ported word for word, so the
-  parity recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
+  e2e recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
   interrupted note (`cli/listing.rs`, `cli.rs`'s `resume_command`), `` `orchestrator.py workflows default` `` in
   `workflows` (`cli/workflows.rs`), and `orchestrator.py` among `judged-in-quality`'s `JUDGING_FILES`, a file the
   tree no longer has, while the files the build's Rust depends on, `rust-toolchain.toml` and `Cargo.lock`, are not
   among them, so a quality build of another toolchain counts as having judged the tree. Found by rust-engine ticket 11
-  and its code review (2026-10-30). Closes with the engine naming itself `orchestrator`, its tests and the parity
+  and its code review (2026-10-30). Closes with the engine naming itself `orchestrator`, its tests and the e2e
   recordings changed with it, and `JUDGING_FILES` the files that judge the tree now, in a change of its own after the
   switch.
 - **No test crashes the Rust engine after each save.** `tests/test_crash_resume.py` crashed the Python engine
@@ -267,8 +267,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
   running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
   its group and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands
-  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The parity
-  harness's kill kills each process below the engine too (`Invocation.kill`), as "a crash or a lost machine" does;
+  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The e2e
+  scenarios' kill kills each process below the engine too (`Invocation::kill`, `engine/e2e/tests/e2e/world.rs`), as "a crash or a lost machine" does;
   before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
   ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
   `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).

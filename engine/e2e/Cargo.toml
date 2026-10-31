@@ -1,7 +1,7 @@
 [package]
 name = "octoflow-e2e"
 version = "0.1.0"
-description = "The engine's end-to-end scenarios: the orchestrator program run against fakes of herdr, gh and ssh"
+description = "The engine's end-to-end scenarios: the orchestrator program run against fakes of herdr, gh, ssh, Jenkins and PyPI"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false

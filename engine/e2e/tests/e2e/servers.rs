@@ -72,15 +72,16 @@ impl Servers {
 }
 
 impl Drop for Servers {
+    /// Stops both servers; panics, failing the scenario at its cause, when one of them panicked while it served,
+    /// unless the scenario fails already.
     fn drop(&mut self) {
         self.jenkins.unblock();
         self.stopping.store(true, Ordering::SeqCst);
         // Wakes the proxy's accept, which then sees stopping; a failure means it no longer listens.
         let _ = TcpStream::connect(self.proxy_address);
-        for thread in self.threads.drain(..) {
-            if thread.join().is_err() {
-                eprintln!("a server of the world panicked");
-            }
+        let panicked = self.threads.drain(..).filter_map(|thread| thread.join().err()).count();
+        if panicked > 0 && !std::thread::panicking() {
+            panic!("{panicked} of the world's servers panicked while serving; their messages are above");
         }
     }
 }
@@ -322,13 +323,20 @@ fn form_json(form: &[(String, Vec<String>)]) -> Json {
     Json::Object(form.iter().map(|(k, v)| (k.as_str(), octoflow_e2e::strings(v))).collect())
 }
 
-/// text with each `%XX` decoded to its byte, the bytes read as UTF-8 with replacement, as urllib.parse.unquote does.
+/// text with each `%XX` decoded to its byte, X a hex digit, the bytes read as UTF-8 with replacement, as
+/// urllib.parse.unquote does; a `%` before anything else stays as it is.
+///
+/// Not the engine's `py::url::unquote_plus`, which octoflow-without-python ticket 06 removes with `crate::py`.
 fn unquote(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        // Two hex digits, not a number from_str_radix would take, which may start with a sign.
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
         match (bytes[i], hex) {
             (b'%', Some(b)) => {
                 out.push(b);
@@ -394,11 +402,9 @@ fn proxy_accept(listener: &TcpListener, world: &Path, tls: &Arc<rustls::ServerCo
         let (world, tls): (PathBuf, _) = (world.to_path_buf(), Arc::clone(tls));
         connections.push(std::thread::spawn(move || proxy_connection(stream, &world, tls)));
     }
-    for connection in connections {
-        if connection.join().is_err() {
-            eprintln!("a connection to the PyPI proxy panicked");
-        }
-    }
+    // A connection's panic is the proxy's: its thread panics in turn, which Servers::drop reports.
+    let panicked = connections.into_iter().filter_map(|connection| connection.join().err()).count();
+    assert_eq!(panicked, 0, "{panicked} connections to the PyPI proxy panicked");
 }
 
 /// One connection to the proxy: a CONNECT to pypi.org:443, answered by PyPI over TLS with the world's certificate;
@@ -451,4 +457,5 @@ fn a_form_is_read_as_parse_qs_reads_it() {
     let expected = vec![("GIT_REF".to_string(), vec!["orchestrator-ci/a b".to_string()]), ("x".to_string(), vec!["1".to_string(), "2".to_string()])];
     assert_eq!(form, expected);
     assert_eq!(unquote("100%25%zz%e2%80%94"), "100%%zz\u{2014}");
+    assert_eq!(unquote("a%+1%-1%"), "a%+1%-1%");
 }

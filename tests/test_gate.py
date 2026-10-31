@@ -4892,8 +4892,8 @@ class TestSurvivingMutants(RepositoryTest):
     def test_mutmut_runs_only_the_tests_the_contexts_record_reaching_the_changed_functions(self):
         self.change_the_functions("checked", "unchecked")
         selections = self.selections()
-        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's do; and the
-        # tree has none, so pytest collects it from no selection.
+        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's once did; and
+        # the tree has none, so pytest collects it from no selection.
         data_file = self.contexts({"tests/test_calc.py::test_checked": [1, 2],
                                    "tests/test_calc.py::test_unchecked": [5, 6],
                                    "tests/test_calc.py::test_untouched": [9, 10],

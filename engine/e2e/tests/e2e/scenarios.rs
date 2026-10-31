@@ -374,12 +374,7 @@ pub fn gate_turned_on_by_resume(w: &mut World) {
     w.agent("spec", [spec_written()]);
     w.agent("build", [built(1, 0).hold("build")]);
     w.agent("review", [approved(1)]);
-    let run = w.start(&["run", "--", TASK], true);
-    w.wait_reached("build");
-    w.invocation(run).kill();
-    w.release("build");
-    let key = w.run_key(1);
-    w.run(&["resume", "--force", "--quality-gate", JOB, &key]);
+    killed_and_resumed_with(w, "build", &["run", "--", TASK], &["--quality-gate", JOB]);
 }
 
 /// A run killed while Jenkins builds its first quality round, resumed with --no-quality-gate: its refs on origin go,
@@ -432,12 +427,17 @@ pub fn publish_with_conflict(w: &mut World) {
 /// Run the engine with args until it reaches hold, kill it there, then let hold go and resume the run with --force,
 /// which a run whose orchestrator died a moment ago needs: its heartbeat is still fresh.
 fn killed_and_resumed(w: &mut World, hold: &str, args: &[&str]) {
+    killed_and_resumed_with(w, hold, args, &[]);
+}
+
+/// killed_and_resumed, the resume given resume_flags before the run's key.
+fn killed_and_resumed_with(w: &mut World, hold: &str, args: &[&str], resume_flags: &[&str]) {
     let run = w.start(args, true);
     w.wait_reached(hold);
     w.invocation(run).kill();
     w.release(hold);
     let key = w.run_key(1);
-    w.run(&["resume", "--force", &key]);
+    w.run(&[&["resume", "--force"][..], resume_flags, &[key.as_str()]].concat());
 }
 
 /// Killed while the Spec Collector interviews; resumed, the interview's file is found written.

@@ -161,14 +161,14 @@ impl EventStream {
         self.items.lock().expect("the event stream's items").iter().filter_map(|(_, item)| item.clone()).collect()
     }
 
-    /// Stop reading: shut the connection down and wait for the reader to end.
+    /// Stop reading: shut the connection down and wait for the reader to end. Panics, failing the scenario at its
+    /// cause, when the reader panicked, unless the scenario fails already.
     pub fn close(&mut self) {
         // A connection serve closed already cannot be shut down again; the reader has ended then.
         let _ = self.stream.shutdown(Shutdown::Both);
-        if let Some(reader) = self.reader.take() {
-            if reader.join().is_err() {
-                eprintln!("the event stream's reader panicked");
-            }
+        let panicked = self.reader.take().is_some_and(|reader| reader.join().is_err());
+        if panicked && !std::thread::panicking() {
+            panic!("the event stream's reader panicked; its message is above");
         }
     }
 }

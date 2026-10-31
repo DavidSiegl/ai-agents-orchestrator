@@ -74,16 +74,6 @@ pipeline {
             }
         }
 
-        // A pull request into main must raise the release version over main's: the Release stage releases a merge into
-        // main only when its version has no release yet, so a merge that kept it would go unreleased
-        // (ci/version-raised.sh).
-        stage('Version') {
-            when { changeRequest target: 'main' }
-            steps {
-                sh 'ci/version-raised.sh'
-            }
-        }
-
         // A build of main skips Test and Gate when a pull request build already judged its tree
         // (ci/judged-at-pr.sh). Whatever stops the script from saying so, the build judges the tree itself.
         stage('Judged at PR') {
@@ -196,7 +186,9 @@ pipeline {
                 // A quality build (GIT_REF set) leaves the e2e scenarios out, by a nextest filter, when its change,
                 // against HEAD^, the run's base, touches nothing they depend on: the engine and the e2e package under
                 // engine/, the Cargo workspace it builds in, the example workflows they run, and ci/, which pins the
-                // gitleaks they run. Their Python forerunner took quality build #59 past the orchestrator's
+                // gitleaks they run; and tests/conftest.py, tests/guard_errors.py and the Python environment, which the
+                // Python harness ran them under: kept from its list (octoflow-without-python ticket 02), at the cost of
+                // a quality build that runs them when only those change. Their Python forerunner took quality build #59 past the orchestrator's
                 // QUALITY_TIMEOUT (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request
                 // builds always run them.
                 sh '''
@@ -204,7 +196,8 @@ pipeline {
                     rm -f "$junit"
                     set --
                     if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
-                            rust-toolchain.toml examples ci; then
+                            rust-toolchain.toml tests/conftest.py tests/guard_errors.py examples pyproject.toml \
+                            uv.lock .python-version ci; then
                         set -- -E 'not package(octoflow-e2e)'
                     fi
                     E2E_ENGINE="$WORKSPACE/target/llvm-cov-target/debug/orchestrator" \\
@@ -348,6 +341,16 @@ pipeline {
                 always {
                     archiveArtifacts artifacts: 'quality.md', allowEmptyArchive: true
                 }
+            }
+        }
+
+        // A pull request into main must raise the release version over main's: the Release stage releases a merge into
+        // main only when its version has no release yet, so a merge that kept it would go unreleased
+        // (ci/version-raised.sh). After Gate, so that a build that fails it has reported its tests and gate first.
+        stage('Version') {
+            when { changeRequest target: 'main' }
+            steps {
+                sh 'ci/version-raised.sh'
             }
         }
 
