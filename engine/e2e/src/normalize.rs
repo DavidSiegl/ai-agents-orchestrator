@@ -3,7 +3,7 @@
 //! Times, run ids, pids and git object names, the world's directory and the host's name. Everything else in a record
 //! is compared as it is.
 //!
-//! The recordings were normalized by tests/parity/normalize.py's regular expressions, which this module matches by
+//! The recordings were normalized by the Python harness's regular expressions (normalize.py), which this module matches by
 //! hand, with their semantics: `\b` is a change between a word character (a letter, a digit or `_`, as Python's
 //! Unicode `\w`) and any other, `\d` an ASCII digit (the records hold no other), and hex is `[0-9a-f]`.
 
@@ -493,12 +493,13 @@ mod tests {
         assert_eq!(got, ["3", "<run:1>", "VERDICT_X", "build_path", "https://x.example/a", "src/calc.py"]);
     }
 
-    /// What tests/parity/normalize.py gave for the inputs of tests/parity/normalize_oracle.py, which made it.
+    /// What the Python harness's normalizer gave for these inputs, made by it before octoflow-without-python ticket 02
+    /// removed it, with the normalizer oracle_normalizer makes.
     fn oracle() -> Json {
         Json::parse(include_str!("normalize/oracle.json")).expect("oracle.json is JSON")
     }
 
-    /// The normalizer normalize_oracle.py makes: without the host's name, which could occur in an input on some host;
+    /// The normalizer the oracle was made with: without the host's name, which could occur in an input on some host;
     /// two literals, one inside the other; three pids, the first registered twice; and the oracle's record learnt.
     fn oracle_normalizer(oracle: &Json) -> Normalizer {
         let mut n = Normalizer::new();

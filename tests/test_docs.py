@@ -6,16 +6,17 @@ Each failure names the document and line that is wrong, as `file:line: what`.
 import argparse
 import ast
 import functools
+import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import unittest
 import urllib.parse
 from unittest.mock import patch
 
 import conftest
-import rust_engine
 
 import gate
 
@@ -45,10 +46,8 @@ OTHER_PROGRAMS_NAMES = {
     "SSL_CERT_FILE": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "SSL_CERT_DIR": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "ORCHESTRATOR_BIN": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
-    "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
     "E2E_ENGINE": "the e2e scenarios' environment variable, engine/e2e/tests/e2e/engine.rs",
-    "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",
-    "PARITY_COMMANDS": "the parity harness's environment variable, tests/parity/test_parity.py",
+    "E2E_RECORD": "the e2e scenarios' environment variable, engine/e2e/tests/e2e/main.rs",
     "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
@@ -73,9 +72,32 @@ FILE_NAMES = {
 }
 
 
+@functools.cache
+def engine_binary() -> str:
+    """The path of the orchestrator binary whose help the docs are checked against: ORCHESTRATOR_BIN's, as the desktop
+    app takes it, when it is set, such as the build the Jenkinsfile's Test stage made for coverage; else this
+    checkout's, `cargo build --locked -p octoflow-engine --bin orchestrator` run once per test run, at the path cargo
+    reports. Raises AssertionError when cargo is missing or the build fails, so that a machine without cargo fails
+    these tests rather than skipping them."""
+    if given := os.environ.get("ORCHESTRATOR_BIN"):
+        return given
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise AssertionError("cargo, which builds the engine, is not on PATH")
+    built = subprocess.run([cargo, "build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator",  # noqa: S603
+                            "--message-format=json"], cwd=ROOT, capture_output=True, text=True, check=False)
+    if built.returncode != 0:
+        raise AssertionError(f"cargo could not build the engine: {built.stderr}")
+    paths = [m["executable"] for m in map(json.loads, built.stdout.splitlines())
+             if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    if len(paths) != 1:
+        raise AssertionError(f"cargo reported {len(paths)} binaries for the engine, not one")
+    return paths[0]
+
+
 def engine_help(*command: str) -> str:
     """What the engine prints for `orchestrator [command] --help`."""
-    return subprocess.run([rust_engine.binary(), *command, "--help"], capture_output=True, text=True,  # noqa: S603
+    return subprocess.run([engine_binary(), *command, "--help"], capture_output=True, text=True,  # noqa: S603
                           check=True).stdout
 
 

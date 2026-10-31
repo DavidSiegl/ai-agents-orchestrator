@@ -50,11 +50,11 @@ engine's templates (`prompt_parity.rs`). `host/tests.rs` and `host/scan/tests.rs
 temporary repositories, with gh, gitleaks and ssh played by scripts on the `Host`'s `PATH`, which `ProcessHost`
 takes from the environment it is given rather than the process's. `harness/tests.rs` replays the Python engine's
 launch arguments for every harness, permission mode, model, session and directory, and its token counts of sample
-session logs; `herdr/tests.rs` replays every herdr command the parity scenarios recorded through `ProcessHerdr`, and
+session logs; `herdr/tests.rs` replays every herdr command the e2e scenarios recorded through `ProcessHerdr`, and
 checks each recorded agent start against the launch arguments of the run's state as last saved before it.
 `workflow/tests.rs` and its submodules, each holding one or more Python classes, run `Workflow` on `FakeHost`,
 `FakeHerdr`, `FakeClock`, `FakeJenkins` and `FakePyPI`, the Python tests of it ported case for case.
-`checks/tests.rs` runs `judge_run` on every quality file a parity recording holds, from the build's quality.md its
+`checks/tests.rs` runs `judge_run` on every quality file an e2e recording holds, from the build's quality.md its
 scenario's Jenkins served, and gives the recorded file.
 
 ## The phase machine
@@ -299,44 +299,34 @@ file `quality_report` writes, and `TestGate`, the program itself, with stub lint
 and `tests/test_docs.py` hold the rules the docs state, and the docs to the code: the commands and flags the engine's
 help lists, the names `engine/src` and `gate.py` define, and every link.
 
-`tests/parity/` is the parity harness, the oracle the Rust engine was ported against: it runs the engine as a program,
-with nothing of it imported. Each scenario in `scenarios.py` scripts a `World` (`world.py`): a git project on `main`
-with a bare `origin` beside it, the fake herdr, gh and ssh of `fakes.py` first on `PATH` and the real gitleaks after
-them (TODO.md says what a missing one does), and Jenkins, and PyPI behind an HTTPS proxy, served from the test process.
-It runs this checkout's engine there, built with cargo (`tests/rust_engine.py`), or the program `PARITY_ENGINE` names,
-killing and resuming it where the scenario says, and the world records, normalized by `normalize.py` (times, run ids,
-pids, hashes, its own paths and ports): each invocation's exit status, the output programs read whole and other
-output only as its facts; the commands herdr and gh got and the requests Jenkins and PyPI got, in order, with
-`state.json` wherever it changed between them; the run directory's files; and both repositories' refs, commits and
-working trees. `test_parity.py` fails a scenario whose record differs from `recorded/<scenario>.json`, naming where.
-The recordings are the Python engine's, made before rust-engine ticket 11 removed it; while both engines were there,
-each scenario that kills a run and resumes it also ran with one engine before the kill and the other after it, so a
-run either engine left resumes in the other. `PARITY_RECORD=1` writes recordings instead, from the Rust engine, for
-a scenario added since, whose recording is then a review of what the engine does. `PARITY_COMMANDS` (`run,resume`,
-say) leaves out each scenario whose recording invokes the engine with another command. A kill ends the engine's
-group and each process below it, since the engine runs each command in a group of its own.
-
-`engine/e2e/` (package `octoflow-e2e`) is that harness in Rust, replacing it scenario by scenario
-(octoflow-without-python tickets 01 and 02), and its scenarios replay the same recordings, `engine/e2e/recorded/`,
-which both harnesses read and neither changes. The fakes are `[[bin]]` targets of the package (`src/bin/`, their
-logic in `src/fakes.rs`), so that its test finds them by `CARGO_BIN_EXE_*`; they and the test share the ledger
-(`src/ledger.rs`, under `flock`) and the normalizer (`src/normalize.rs`), whose matchers are `normalize.py`'s regular
-expressions written out by hand, with their semantics. The test, `tests/e2e/`, holds the `World` and the scenarios,
-one `#[test]` each; it runs `E2E_ENGINE`'s binary when that is set, as Jenkins's Test stage sets it to the build it
-made for coverage, else builds the checkout's with cargo. `E2E_RECORD=1 cargo nextest run -p octoflow-e2e` writes
-recordings instead. So far the World serves neither Jenkins nor PyPI: the scenarios that need them, with kills, the
-quality gate and serve, come with ticket 02.
+`engine/e2e/` (package `octoflow-e2e`) holds the e2e scenarios, which run the engine as a program, with nothing of
+it imported; they are the only test of a run from start to verdict. Each scenario in `tests/e2e/scenarios.rs`
+scripts a `World` (`tests/e2e/world.rs`): a git project on `main` with a bare `origin` beside it, the fake herdr, gh
+and ssh first on `PATH` and the real gitleaks after them (TODO.md says what a missing one does), and Jenkins, and PyPI
+behind an HTTPS proxy, served from the test process (`tests/e2e/servers.rs`). The fakes are `[[bin]]` targets of the
+package (`src/bin/`, their logic in `src/fakes.rs`), so that its test finds them by `CARGO_BIN_EXE_*`; they and the
+test share the ledger (`src/ledger.rs`, under `flock`). The World runs `E2E_ENGINE`'s binary when that is set, as
+Jenkins's Test stage sets it to the build it made for coverage, else builds the checkout's with cargo, killing and
+resuming it where the scenario says, and records, normalized by `src/normalize.rs` (times, run ids, pids, hashes, its
+own paths and ports): each invocation's exit status, the output programs read whole and other output only as its
+facts; the commands herdr and gh got and the requests Jenkins and PyPI got, in order, with `state.json` wherever it
+changed between them; the run directory's files; and both repositories' refs, commits and working trees. A scenario
+whose record differs from `recorded/<scenario>.json` fails, naming where. The recordings are the Python engine's,
+made by the Python harness this replaced (octoflow-without-python tickets 01 and 02) before rust-engine ticket 11
+removed that engine. `E2E_RECORD=1 cargo nextest run -p octoflow-e2e` writes recordings instead, from the Rust
+engine, for a scenario added since or a change to what the engine does, whose recording is then a review of it. A
+kill ends the engine's group and each process below it, since the engine runs each command in a group of its own.
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
 files instead. A change to that text is reviewed as the diff of its golden files. They hold two texts. `gate.py`'s
-quality file, which the Builder and the Reviewer read and which no parity scenario writes, since their Jenkins serves
+quality file, which the Builder and the Reviewer read and which no e2e scenario writes, since their Jenkins serves
 hand-written ones: `TestQualityReport` holds `quality_report` to a file per gate word and per way it words a section,
 and `TestGate` the whole file the gate writes for a passing and a failing change, `judge_change`'s intro, conditions
 and coverage sentence included. And the engine's prompts: each step's prompts in
 the built-in workflow and each example workflow, as `Workflow` renders them, to a file per workflow, round 1 and,
 for the steps the review loops over, round 2 as the running session and a fresh one hear it; the Python engine's
-tests wrote them, and the engine's `workflow/tests/default_prompts.rs` holds the Rust engine to them. The parity scenarios
+tests wrote them, and the engine's `workflow/tests/default_prompts.rs` holds the Rust engine to them. The e2e scenarios
 record round 1 of each workflow as sent, so a reworded prompt fails both. Of round 2 of the examples and of a fresh
 session's prompts, the recordings hold only the templates, in `state.json`; the text as sent, placeholders filled in
 and a fresh session's prompt put together, only the golden files hold. The engine's
@@ -372,9 +362,9 @@ agent runs in the suite.
   `workflows` lists `default`. Before the build, cargo-about writes `dist/octoflow-third-party-licenses.html`, the
   license texts of the crates in the binary and the desktop app, by `packaging/about.toml` and `about.hbs`; a crate
   under a license `about.toml` does not accept fails the script.
-- `Jenkinsfile`: `uv sync --frozen`, the engine built, `uv run pytest` with branch coverage of `gate` (without
-  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
-  the Cargo workspace's tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `gate`, and the Cargo workspace's
+  tests with line coverage (`cargo llvm-cov nextest`), without the e2e scenarios in a quality build whose change
+  touches nothing they judge (the Test stage lists what), a UI stage that runs `ui/`'s `npm ci`,
   `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
   `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
   `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a

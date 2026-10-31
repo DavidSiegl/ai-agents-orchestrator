@@ -58,7 +58,7 @@ def gate_rust():
     """The path of the gate-rust helper built from ci/gate-rust beside these tests, for the tests that read real Rust:
     built once per run, a debug build, wherever CARGO_TARGET_DIR puts it. Under mutmut that is its copy of the crate's
     sources (pyproject.toml's also_copy). A machine without cargo fails these tests rather than skipping them, as the
-    parity harness fails without its tools (TODO.md, "The Rust engine's parity harness")."""
+    e2e scenarios fail without their tools (TODO.md, "The e2e scenarios: what they do not record")."""
     manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ci", "gate-rust", "Cargo.toml")
     if CARGO is None:
         raise AssertionError("cargo, which builds the gate-rust helper, is not on PATH")

@@ -2,7 +2,7 @@
 fails a test and is reviewed as the diff of that copy.
 
 `UPDATE_GOLDEN=1 uv run pytest` rewrites the copies a run compares with what the code now writes; read their diff
-before committing it. docs/architecture.md (Tests) says what has golden files and what the parity harness pins
+before committing it. docs/architecture.md (Tests) says what has golden files and what the e2e scenarios pin
 instead.
 """
 

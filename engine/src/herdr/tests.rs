@@ -1,6 +1,6 @@
 //! herdr as the engine drives it: tests/test_orchestrator.py's TestHerdr, TestHerdrLookups and TestChildEnvironment's
 //! herdr case, ported case for case on a ProcessHerdr whose commands a closure answers, as Python's Herdr(run=...);
-//! real processes for what only they show; every herdr command the parity scenarios recorded; and the FakeHerdr the
+//! real processes for what only they show; every herdr command the e2e scenarios recorded; and the FakeHerdr the
 //! Workflow tests of ticket 08 run on.
 
 use std::rc::Rc;
@@ -475,7 +475,7 @@ fn herdr_gets_no_credentials() {
     assert_scrubbed(&std::fs::read_to_string(env).unwrap());
 }
 
-// -- What the parity scenarios recorded ------------------------------------------------------------------------------
+// -- What the e2e scenarios recorded ---------------------------------------------------------------------------------
 
 /// Give herdr the method call that makes the recorded command args (without --machine); None for a command that is
 /// not one of ProcessHerdr's (the doctor's --version and integration status). Its answer is not looked at.

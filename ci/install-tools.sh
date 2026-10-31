@@ -3,8 +3,8 @@
 # downloaded or its archive does not match its pinned sha256. Jenkins's Install stage runs it with a directory the
 # Jenkinsfile puts first on PATH, for tools the agent image does not provide:
 #
-# - gitleaks, which the parity scenarios (tests/parity) run for real, failing where there is none. Its version is the
-#   one the parity recordings were made with.
+# - gitleaks, which the e2e scenarios (engine/e2e) run for real, failing where there is none. Its version is the
+#   one their recordings were made with.
 # - cargo-llvm-cov and cargo-nextest, with which the Test stage runs the Rust tests and measures their coverage
 #   (docs/quality-gate.md). cargo-llvm-cov also needs rustup's llvm-tools component, which the agent image provides.
 # - cargo-mutants, with which gate.py's surviving-mutants check mutation-tests the Rust a change edits.

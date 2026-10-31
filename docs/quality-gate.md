@@ -801,7 +801,7 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
-  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
+  pinned releases of the gitleaks the e2e scenarios (`engine/e2e`) run, of cargo-llvm-cov and cargo-nextest,
   for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
   tests at the base, of cargo-mutants, for the surviving-mutants check's Rust, and of cargo-about, for the Package
   stage's third-party licenses, into the workspace's `.tools/bin`,

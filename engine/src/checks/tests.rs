@@ -1,6 +1,6 @@
 //! tests/test_orchestrator.py's TestJudgeRun (its quality files written by gate.py, in checks.json), TestDiffBudget,
 //! and TestOrchestratorChecks without the Workflow that runs them in a quality round; and judge_run on every quality
-//! file the parity recordings hold.
+//! file the e2e recordings hold.
 
 use std::cell::RefCell;
 use std::sync::Arc;
