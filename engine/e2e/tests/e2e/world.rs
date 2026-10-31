@@ -82,7 +82,8 @@ impl Invocation {
             if Instant::now() > deadline {
                 self.kill();
                 let err = self.stderr();
-                let tail = &err[err.len().saturating_sub(3000)..];
+                // The last 3000 characters: a cut by bytes could fall inside one, and panic in place of this panic.
+                let tail: String = err.chars().skip(err.chars().count().saturating_sub(3000)).collect();
                 panic!("engine {:?} ran over {INVOCATION_TIMEOUT:?}:\n{tail}", self.args);
             }
             sleep(WAIT_POLL);
@@ -598,10 +599,11 @@ impl World {
             .envs(self.env(None))
             .output()
             .unwrap_or_else(|e| panic!("running git symbolic-ref: {e}"));
-        let head = if symbolic.status.success() {
-            String::from_utf8_lossy(&symbolic.stdout).trim().to_string()
-        } else {
-            "detached".to_string()
+        // --quiet: a HEAD that is no symbolic ref exits 1 and prints nothing; any other failure is the harness's.
+        let head = match symbolic.status.code() {
+            Some(0) => String::from_utf8_lossy(&symbolic.stdout).trim().to_string(),
+            Some(1) => "detached".to_string(),
+            _ => panic!("git symbolic-ref HEAD in {}: {}", repo.display(), String::from_utf8_lossy(&symbolic.stderr)),
         };
         let mut sorted: Vec<(&str, &Json)> = refs.iter().collect();
         sorted.sort_by_key(|(name, _)| *name);
