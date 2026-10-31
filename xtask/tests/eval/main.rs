@@ -279,6 +279,11 @@ fn an_unreadable_bundle_is_an_error_of_the_runners() {
 }
 
 #[test]
+fn an_error_shows_its_message() {
+    assert_eq!(xtask::Error("could not clone".to_string()).to_string(), "could not clone");
+}
+
+#[test]
 fn every_task_by_default_in_name_order() {
     let tasks = eval::load_tasks(None, &real_tasks_dir()).expect("the tasks load");
     assert_eq!(tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), TASK_NAMES);

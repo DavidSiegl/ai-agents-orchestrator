@@ -200,46 +200,51 @@ fn split_words(command: &str) -> Option<Vec<String>> {
     let mut word: Option<String> = None;
     let mut chars = command.chars();
     while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            words.extend(word.take());
+            continue;
+        }
+        let w = word.get_or_insert_with(String::new);
         match c {
-            c if c.is_whitespace() => words.extend(word.take()),
-            '\'' => {
-                let w = word.get_or_insert_with(String::new);
-                loop {
-                    match chars.next()? {
-                        '\'' => break,
-                        c => w.push(c),
-                    }
-                }
-            }
-            '"' => {
-                let w = word.get_or_insert_with(String::new);
-                loop {
-                    match chars.next()? {
-                        '"' => break,
-                        '\\' => match chars.next()? {
-                            c @ ('"' | '\\' | '$' | '`') => w.push(c),
-                            '\n' => {}
-                            c => {
-                                w.push('\\');
-                                w.push(c);
-                            }
-                        },
-                        c => w.push(c),
-                    }
-                }
-            }
-            '\\' => {
-                let w = word.get_or_insert_with(String::new);
-                match chars.next()? {
-                    '\n' => {}
-                    c => w.push(c),
-                }
-            }
-            c => word.get_or_insert_with(String::new).push(c),
+            '\'' => single_quoted(&mut chars, w)?,
+            '"' => double_quoted(&mut chars, w)?,
+            // Outside quotes, a backslash keeps the character after it, and joins the next line.
+            '\\' => match chars.next()? {
+                '\n' => {}
+                c => w.push(c),
+            },
+            c => w.push(c),
         }
     }
     words.extend(word);
     Some(words)
+}
+
+/// What follows an opening single quote in chars, up to the closing one, pushed onto word as it stands; None when
+/// no quote closes it.
+fn single_quoted(chars: &mut std::str::Chars, word: &mut String) -> Option<()> {
+    loop {
+        match chars.next()? {
+            '\'' => return Some(()),
+            c => word.push(c),
+        }
+    }
+}
+
+/// What follows an opening double quote in chars, up to the closing one, pushed onto word, a backslash taken off
+/// before `"`, `\\`, `$` and `` ` `` and with a newline after it; None when no quote closes it.
+fn double_quoted(chars: &mut std::str::Chars, word: &mut String) -> Option<()> {
+    loop {
+        match chars.next()? {
+            '"' => return Some(()),
+            '\\' => match chars.next()? {
+                c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                '\n' => {}
+                c => word.extend(['\\', c]),
+            },
+            c => word.push(c),
+        }
+    }
 }
 
 /// The path of checkout's orchestrator binary, `cargo build --locked -p octoflow-engine --bin orchestrator` run there

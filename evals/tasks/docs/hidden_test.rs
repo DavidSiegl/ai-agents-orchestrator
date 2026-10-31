@@ -34,37 +34,47 @@ fn code(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// The fence line is a CommonMark fence of: its character, a backtick or a tilde, the length of its run, three or
+/// more, and whether nothing follows the run, as a closing fence needs; None for any other line, one indented by more
+/// than three spaces included.
+fn fence(line: &str) -> Option<(char, usize, bool)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
+    let marker = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = rest.chars().take_while(|&c| c == marker).count();
+    (run >= 3).then(|| (marker, run, rest[run..].trim().is_empty()))
+}
+
+/// Whether line is a heading of level 1 or 2, as it stands outside a fenced block.
+fn top_heading(line: &str) -> bool {
+    let rest = line.trim_start_matches(' ');
+    line.len() - rest.len() <= 3 && (rest.starts_with("# ") || rest.starts_with("## "))
+}
+
 /// The lines of README.md's `## Usage` section, after its heading, up to the next heading of level 1 or 2 outside a
-/// fenced block; empty without one. Each line is paired with whether it is inside a fenced block (CommonMark: a run
-/// of three or more backticks or tildes, indented by up to three spaces, closed by a run of the same character at
-/// least as long with nothing after it).
+/// fenced block; empty without one. Each line is paired with whether it is inside a fenced block, which a fence
+/// (CommonMark) opens and a run of the same character at least as long, with nothing after it, closes.
 fn usage() -> Vec<(bool, String)> {
     let mut section = vec![];
     let mut inside = false;
-    let mut fence: Option<(char, usize)> = None;
+    let mut open: Option<(char, usize)> = None;
     for line in read("README.md").lines() {
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        let rest = line.trim_start_matches(' ');
-        let marker = rest.chars().next().filter(|c| matches!(c, '`' | '~'));
-        let run = marker.map_or(0, |c| rest.chars().take_while(|&x| x == c).count());
-        let fenced_before = fence.is_some();
-        match (fence, marker) {
-            (None, Some(c)) if indent <= 3 && run >= 3 => fence = Some((c, run)),
-            (Some((c, n)), Some(m)) if m == c && indent <= 3 && run >= n && rest[run..].trim().is_empty() => {
-                fence = None
-            }
+        let fenced_before = open.is_some();
+        match (open, fence(line)) {
+            (None, Some((c, n, _))) => open = Some((c, n)),
+            (Some((c, n)), Some((m, run, true))) if m == c && run >= n => open = None,
             _ => {}
         }
-        let heading = !fenced_before && indent <= 3 && (rest.starts_with("# ") || rest.starts_with("## "));
+        let heading = !fenced_before && top_heading(line);
         if heading && inside {
             break;
         }
         if inside {
-            section.push((fenced_before && fence.is_some(), line.to_string()));
+            section.push((fenced_before && open.is_some(), line.to_string()));
         }
-        if heading && rest.trim_end() == "## Usage" {
-            inside = true;
-        }
+        inside |= heading && line.trim() == "## Usage";
     }
     section
 }

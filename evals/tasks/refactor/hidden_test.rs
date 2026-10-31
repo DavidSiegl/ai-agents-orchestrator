@@ -9,7 +9,6 @@ use invoice::{item_line, render_credit_note, render_invoice, round_div};
 
 /// src/lib.rs as the task found it, which the renderers' output is compared with. xtask's tests check that it is the
 /// toy repository's (xtask/src/toy_repos.rs, REFACTOR_LIB).
-#[allow(dead_code)]
 mod original {
     //! Plain-text invoices and credit notes.
     //!
